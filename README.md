@@ -36,7 +36,7 @@ pip install liger_kernel nvitop pre-commit math_verify py-spy -U
 ```
 
 ### Data Preparation
-Referring segmentation datasets: [TNL2K](https://web.archive.org/web/20220413011718/https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip), [TNLLT](https://web.archive.org/web/20220413011656/https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip)
+Datasets: [TNL2K](https://github.com/wangxiao5791509/TNL2K_evaluation_toolkit), [TNLLT](https://github.com/Event-AHU/Open_VLTrack)
 
 ```angular2html
 |-- data
