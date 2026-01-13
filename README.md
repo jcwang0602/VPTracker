@@ -1,7 +1,7 @@
 # VPTracker: Global Vision-Language Tracking via Visual Prompt and MLLM
 
-<!-- [![hf_paper](https://img.shields.io/badge/🤗-Paper%20In%20HF-red.svg)](https://huggingface.co/papers/2508.04107) -->
-[![arXiv](https://img.shields.io/badge/Arxiv-2508.04107-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2512.22799)
+[![hf_paper](https://img.shields.io/badge/🤗-Paper%20In%20HF-red.svg)]((https://huggingface.co/papers/2512.22799))
+[![arXiv](https://img.shields.io/badge/Arxiv-2512.22799-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2512.22799)
 [![Python](https://img.shields.io/badge/Python-3.9-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5.1-red.svg)](https://pytorch.org/)
 [![Transformers](https://img.shields.io/badge/Transformers-4.37.2-green.svg)](https://huggingface.co/docs/transformers/)
