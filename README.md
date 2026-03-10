@@ -13,8 +13,8 @@
 ### Installation
 
 ```bash
-conda create -n gltrack python==3.10
-conda activate gltrack
+conda create -n vptrack python==3.10
+conda activate vptrack
 
 cd ms-swift
 conda install -c conda-forge pyarrow sentencepiece
