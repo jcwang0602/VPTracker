@@ -1,6 +1,8 @@
+from itertools import chain
 from typing import Any, List
 
-from swift.llm import MODEL_MAPPING, TEMPLATE_MAPPING, ModelType, TemplateType
+from swift.model import MODEL_MAPPING, ModelType
+from swift.template import TEMPLATE_MAPPING, TemplateType
 from swift.utils import is_megatron_available
 
 
@@ -10,11 +12,15 @@ def get_url_suffix(model_id):
     return model_id
 
 
+supported_mcore_model_types = None
+
+
 def get_cache_mapping(fpath):
     with open(fpath, 'r', encoding='utf-8') as f:
         text = f.read()
     idx = text.find('| Model ID |')
-    text = text[idx:]
+    end_idx = text.find('| Dataset ID |')
+    text = text[idx:end_idx]
     text_list = text.split('\n')[2:]
     cache_mapping = {}
     for text in text_list:
@@ -28,6 +34,7 @@ def get_cache_mapping(fpath):
 
 
 def get_model_info_table():
+    global supported_mcore_model_types
     fpaths = [
         'docs/source/Instruction/Supported-models-and-datasets.md',
         'docs/source_en/Instruction/Supported-models-and-datasets.md'
@@ -35,9 +42,9 @@ def get_model_info_table():
     cache_mapping = get_cache_mapping(fpaths[0])
     end_words = [['### 多模态大模型', '## 数据集'], ['### Multimodal large models', '## Datasets']]
     result = [
-        '| Model ID | Model Type | Default Template | '
+        '| Model ID | Model Type | Default Template | Default Agent Template | '
         'Requires | Support Megatron | Tags | HF Model ID |\n'
-        '| -------- | -----------| ---------------- | '
+        '| -------- | -----------| ---------------- | ---------------------- | '
         '-------- | ---------------- | ---- | ----------- |\n'
     ] * 2
     res_llm: List[Any] = []
@@ -49,7 +56,6 @@ def get_model_info_table():
 
     for model_type in ModelType.get_model_name_list():
         model_meta = MODEL_MAPPING[model_type]
-        template = model_meta.template
         for group in model_meta.model_groups:
             for model in group.models:
                 ms_model_id = model.ms_model_id
@@ -64,10 +70,22 @@ def get_model_info_table():
                     hf_model_id = '-'
                 tags = ', '.join(group.tags or model_meta.tags) or '-'
                 requires = ', '.join(group.requires or model_meta.requires) or '-'
+                template = group.template or model_meta.template
+                template_meta = TEMPLATE_MAPPING.get(template)
+                agent_template = template_meta.agent_template if template_meta else ''
+                agent_template = agent_template or ''
                 if is_megatron_available():
-                    from swift.megatron import model
-                    support_megatron = getattr(model_meta, 'support_megatron', False)
-                    for word in ['gptq', 'awq', 'bnb', 'aqlm', 'int4', 'int8', 'nf4', 'fp8']:
+                    from mcore_bridge.model import MODEL_MAPPING as MCORE_MODEL_MAPPING
+                    if supported_mcore_model_types is None:
+                        supported_mcore_model_types = set(
+                            list(chain.from_iterable([v.model_types for k, v in MCORE_MODEL_MAPPING.items()])))
+                    if model_meta.mcore_model_type is not None:
+                        support_megatron = True
+                    elif model_meta.model_type in supported_mcore_model_types:
+                        support_megatron = True
+                    else:
+                        support_megatron = False
+                    for word in ['gptq', 'awq', 'bnb', 'aqlm', 'int4', 'int8', 'nf4']:
                         if word in ms_model_id.lower():
                             support_megatron = False
                             break
@@ -79,7 +97,8 @@ def get_model_info_table():
                         mg_count_mllm += 1
                     else:
                         mg_count_llm += 1
-                r = f'|{ms_model_id}|{model_type}|{template}|{requires}|{support_megatron}|{tags}|{hf_model_id}|\n'
+                r = (f'|{ms_model_id}|{model_type}|{template}|{agent_template}|{requires}|'
+                     f'{support_megatron}|{tags}|{hf_model_id}|\n')
                 if model_meta.is_multimodal:
                     res_mllm.append(r)
                 else:

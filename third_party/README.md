@@ -1,9 +1,8 @@
 # Third-party components
 
-VPTracker uses the upstream [ms-swift](https://github.com/modelscope/ms-swift) runtime. The release used for the Qwen3.5 code path is recorded in [`ms_swift.lock.json`](ms_swift.lock.json). Install it from the tagged source instead of installing a second copy from an unpinned Git URL:
+VPTracker uses the upstream [ms-swift](https://github.com/modelscope/ms-swift) runtime. The release used for the Qwen3.5 code path is recorded in [`ms_swift.lock.json`](ms_swift.lock.json). Install the vendored source instead of installing a second copy from an unpinned Git URL:
 
 ```bash
-git clone --branch v4.5.3 --depth 1 https://github.com/modelscope/ms-swift.git
 python -m pip install -e ms-swift
 ```
 

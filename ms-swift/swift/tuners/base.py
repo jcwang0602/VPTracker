@@ -1,27 +1,26 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
+# Copyright (c) ModelScope Contributors. All rights reserved.
 # Copyright 2023-present the HuggingFace Inc. team.
+import json
 import os
 import re
 import shutil
 import tempfile
+import torch
 from contextlib import contextmanager
 from copy import copy
 from functools import partial
 from inspect import Parameter, Signature, signature
-from types import MethodType
-from typing import Dict, List, Literal, Optional, Union
-
-import json
-import torch
 from modelscope import snapshot_download
 from peft.utils import CONFIG_NAME
 from peft.utils.other import SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME
 from torch import nn
-from transformers import Trainer
+from transformers import Trainer as HfTrainer
+from transformers.utils import is_torch_npu_available
+from types import MethodType
+from typing import Dict, List, Literal, Optional, Union
 
+from swift.utils import get_device_count, get_logger
 from swift.utils.constants import DEFAULT_ADAPTER, SWIFT_TYPE_KEY
-from swift.utils.logger import get_logger
-from ..utils.torch_utils import get_device_count
 from .mapping import SwiftTuners
 from .peft import PeftConfig, PeftModel, get_peft_model
 from .utils import SwiftConfig, SwiftOutput
@@ -249,7 +248,12 @@ class SwiftModel(nn.Module):
             The state dict.
         """
         if device is None:
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if torch.cuda.is_available():
+                device = 'cuda'
+            elif is_torch_npu_available():
+                device = 'npu'
+            else:
+                device = 'cpu'
         if os.path.exists(os.path.join(path, SAFETENSORS_WEIGHTS_NAME)):
             filename = os.path.join(path, SAFETENSORS_WEIGHTS_NAME)
             from safetensors.torch import load_file as safe_load_file
@@ -271,7 +275,7 @@ class SwiftModel(nn.Module):
                     all_param_names.update(param_names)
                     param_groups.extend(param_group)
 
-        decay_parameters = Trainer.get_decay_parameter_names(None, self.model)
+        decay_parameters = HfTrainer.get_decay_parameter_names(None, self.model)
         param_groups.extend([
             {
                 'params': [
@@ -688,7 +692,7 @@ class SwiftModel(nn.Module):
         return f'trainable params: {trainable_params:,d} || all params: {all_param:,d} ' \
                f'|| trainable%: {100 * trainable_params / all_param:.4f}' \
                '|| cuda memory: ' \
-               f'{sum([torch.cuda.memory_allocated(i) for i in range(get_device_count())])/1024/1024/1024:.2f}' \
+               f'{sum([torch.cuda.memory_allocated(i) for i in range(get_device_count())]) / 1024 / 1024 / 1024:.2f}' \
                'GiB.'
 
 
@@ -729,8 +733,7 @@ class Swift:
         if isinstance(model, _PeftModel):
             model.merge_and_unload()
         elif isinstance(model, SwiftModel):
-            from swift import LoRAConfig
-            from swift.tuners import LoRA
+            from swift.tuners import LoRA, LoRAConfig
             adapter_name = kwargs.get('adapter_name', None)
             if isinstance(adapter_name, str):
                 adapter_name = [adapter_name]
@@ -809,7 +812,7 @@ class Swift:
                 logger.warn('Only LoRA can be converted to peft format')
                 return True
 
-            from swift import LoRAConfig
+            from swift.tuners import LoRAConfig
             return not LoRAConfig(**_json).can_be_saved_to_peft()
 
         for adapter in adapter_names:
@@ -838,7 +841,7 @@ class Swift:
                 new_state_dict[key] = value
             state_dict = new_state_dict
             SwiftModel._save_state_dict(state_dict, os.path.join(output_dir, adapter), safe_serialization)
-            from swift import LoRAConfig
+            from swift.tuners import LoRAConfig
             with open(os.path.join(output_dir, adapter, CONFIG_NAME), encoding='utf-8') as f:
                 _json = json.load(f)
                 peft_config = LoRAConfig(**_json).to_peft_config()
@@ -902,7 +905,7 @@ class Swift:
                 else:
                     _model.load_adapter(
                         os.path.join(model_id, _adapter_name) if _adapter_name != 'default'
-                        and os.path.exists(os.path.join(model_id, _adapter_name)) else model_id, _new_name)
+                        and os.path.exists(os.path.join(model_id, _adapter_name)) else model_id, _new_name, **kwargs)
                     return _model
 
             if not adapter_name:

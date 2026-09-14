@@ -14,6 +14,14 @@ SWIFT已经支持Embedding模型的训练，包括纯文本和多模态两个类
    - 0.6B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)
    - 4B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-Embedding-4B)
    - 8B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-Embedding-8B)
+5. qwen3-vl-embedding模型
+   - 2B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-VL-Embedding-2B)
+   - 8B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-VL-Embedding-8B)
+6. uembed embedding模型
+   - 2B: [ModelScope](https://modelscope.cn/models/iic/UEmbed-2B) [Hugging Face](https://huggingface.co/Alibaba-NLP/UEmbed-2B)
+   - 4B: [ModelScope](https://modelscope.cn/models/iic/UEmbed-4B) [Hugging Face](https://huggingface.co/Alibaba-NLP/UEmbed-4B)
+   - 9B: [ModelScope](https://modelscope.cn/models/iic/UEmbed-9B) [Hugging Face](https://huggingface.co/Alibaba-NLP/UEmbed-9B)
+
 
 开发者可以自行集成自己的模型，模型forward输出值需要满足：
 
@@ -41,7 +49,7 @@ SWIFT已经支持Embedding模型的训练，包括纯文本和多模态两个类
 - online_contrastive: 考虑hard negative和hard positive部分的contrastive loss，label仅支持0和1两个值
 - infonce: 在同一个batch中不同row两两计算cosine相似度，并使row内部相似度最大，不同row相似度最小，不需要label
 
-loss的源代码可以在[这里](https://github.com/modelscope/ms-swift/blob/main/swift/plugin/loss.py)找到。
+loss的源代码可以在[这里](https://github.com/modelscope/ms-swift/blob/main/swift/loss/mapping.py)找到。
 
 ## 数据集格式
 
@@ -86,7 +94,7 @@ loss的源代码可以在[这里](https://github.com/modelscope/ms-swift/blob/ma
 ```
 
 infonce loss支持几个环境变量：
-1. `INFONCE_TEMPERATURE`： temperature参数，不设置的话默认值是0.01
+1. `INFONCE_TEMPERATURE`： temperature参数，不设置的话默认值是0.1
 2. `INFONCE_USE_BATCH`： 使用sample内部的`negative_messages`（hard negative样例）还是使用一个batch内其他样本作为in-batch negatives；默认为True，表示使用batch内部的样本作为负例
 3. `INFONCE_HARD_NEGATIVES`： hard negatives的数量；如果不设置会使用数据中提供的所有`negative_messages`。由于长度未必一致，因此会采用for循环计算loss（计算会慢）。若设置为某个数值，则不足会随机采样补齐，超长会选用前`INFONCE_HARD_NEGATIVES`个
 4. `INFONCE_MASK_FAKE_NEGATIVE`： mask掉假negative。默认为False，开启时会判断 `positive_similarity + INFONCE_FAKE_NEG_MARGIN`，比该阈值大的样本相似度会被设置为 `-inf`，以防止正样本泄露问题
@@ -102,16 +110,17 @@ infonce loss的评测会有下面几个指标：
 - mean_pos 所有positive的平均值
 - margin positive-max_hard_negative的平均值
 
-## 脚手架
+## 训练
 
-SWIFT提供了两个脚手架训练脚本：
+SWIFT提供的脚手架训练脚本：
 
-- [Qwen3-Embedding模型](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding/train_emb.sh)
+- [Qwen3-Embedding/Qwen3-VL-Embedding模型](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding/qwen3)
 - [GME模型](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding/train_gme.sh)
 
 ## 推理
 
-SWIFT已经支持GME、GTE、Qwen3-Embedding模型的部署，请查看[这里](https://github.com/modelscope/ms-swift/blob/main/examples/deploy/embedding/client.py).
+SWIFT已经支持GME、GTE、Qwen3-Embedding模型的部署，请查看[这里](https://github.com/modelscope/ms-swift/blob/main/examples/deploy/embedding/client.py)。
+- 推理脚本参考[这里](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo_embedding.py)。
 
 也可以使用原模型的代码进行推理：
 

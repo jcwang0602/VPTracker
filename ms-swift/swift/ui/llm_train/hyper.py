@@ -1,9 +1,8 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
+# Copyright (c) ModelScope Contributors. All rights reserved.
+import gradio as gr
 from typing import Type
 
-import gradio as gr
-
-from swift.ui.base import BaseUI
+from ..base import BaseUI
 
 
 class Hyper(BaseUI):
@@ -137,14 +136,14 @@ class Hyper(BaseUI):
                     gr.Textbox(elem_id='output_dir', scale=20)
                     gr.Dropdown(
                         elem_id='attn_impl',
-                        value='flash_attention_2',
-                        choices=[None, 'sdpa', 'eager', 'flash_attention_2', 'flash_attention_3'],
+                        value=None,
+                        choices=[None, 'sdpa', 'eager', 'flash_attention_2', 'flash_attention_3', 'flash_attention_4'],
                         scale=20)
                     gr.Slider(elem_id='neftune_noise_alpha', minimum=0.0, maximum=20.0, step=0.5, scale=20)
 
     @staticmethod
-    def update_lr(sft_type):
-        if sft_type == 'full':
+    def update_lr(tuner_type):
+        if tuner_type == 'full':
             return 1e-5
         else:
             return 1e-4

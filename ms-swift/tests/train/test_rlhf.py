@@ -1,7 +1,7 @@
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
 kwargs = {
     'per_device_train_batch_size': 2,
     'save_steps': 5,
@@ -11,7 +11,7 @@ kwargs = {
 
 
 def test_llm():
-    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
+    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='dpo',
@@ -24,7 +24,7 @@ def test_llm():
 
 
 def test_mllm():
-    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
+    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
     os.environ['MAX_PIXLES'] = f'{1280 * 28 * 28}'
     result = rlhf_main(
         RLHFArguments(
@@ -41,8 +41,9 @@ def test_mllm():
 
 def test_mllm_zero3():
     os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
     os.environ['MAX_PIXLES'] = f'{1280 * 28 * 28}'
-    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
+    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
     rlhf_main(
         RLHFArguments(
             rlhf_type='dpo',
@@ -55,7 +56,31 @@ def test_mllm_zero3():
             **kwargs))
 
 
+def test_dpo_minimal():
+    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
+    result = rlhf_main(
+        RLHFArguments(
+            rlhf_type='dpo',
+            model='Qwen/Qwen2-0.5B',
+            dataset=['AI-ModelScope/orpo-dpo-mix-40k#20'],
+            max_steps=2,
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=1,
+            save_steps=2,
+            split_dataset_ratio=0.01,
+            tuner_type='lora',
+            logging_steps=1,
+            **{
+                k: v
+                for k, v in kwargs.items() if k not in
+                ['per_device_train_batch_size', 'save_steps', 'gradient_accumulation_steps', 'num_train_epochs']
+            }))
+    last_model_checkpoint = result['last_model_checkpoint']
+    infer_main(InferArguments(adapters=last_model_checkpoint, load_data_args=True))
+
+
 if __name__ == '__main__':
     # test_llm()
     test_mllm()
     # test_mllm_zero3()
+    # test_dpo_minimal()

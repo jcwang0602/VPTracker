@@ -1,7 +1,7 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
+os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
 kwargs = {
     'per_device_train_batch_size': 2,
     'per_device_eval_batch_size': 2,
@@ -12,11 +12,11 @@ kwargs = {
 
 
 def test_llm():
-    from swift.llm import TrainArguments, sft_main, infer_main, InferArguments
+    from swift import InferArguments, SftArguments, infer_main, sft_main
     result = sft_main(
-        TrainArguments(
+        SftArguments(
             model='Qwen/Qwen2.5-1.5B-Instruct',
-            train_type='lora',
+            tuner_type='lora',
             num_labels=2,
             dataset=['DAMO_NLP/jd:cls#2000'],
             split_dataset_ratio=0.01,
@@ -27,12 +27,12 @@ def test_llm():
 
 def test_bert():
 
-    from swift.llm import TrainArguments, sft_main, infer_main, InferArguments
+    from swift import InferArguments, SftArguments, infer_main, sft_main
     result = sft_main(
-        TrainArguments(
+        SftArguments(
             model='answerdotai/ModernBERT-base',
             # model='iic/nlp_structbert_backbone_base_std',
-            train_type='full',
+            tuner_type='full',
             num_labels=2,
             dataset=['DAMO_NLP/jd:cls#2000'],
             split_dataset_ratio=0.01,
@@ -42,11 +42,11 @@ def test_bert():
 
 
 def test_mllm():
-    from swift.llm import TrainArguments, sft_main, infer_main, InferArguments
+    from swift import InferArguments, SftArguments, infer_main, sft_main
     result = sft_main(
-        TrainArguments(
+        SftArguments(
             model='OpenGVLab/InternVL2-1B',
-            train_type='lora',
+            tuner_type='lora',
             num_labels=2,
             dataset=['DAMO_NLP/jd:cls#500'],
             split_dataset_ratio=0.01,

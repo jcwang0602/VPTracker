@@ -1,23 +1,22 @@
 import asyncio
+import json
 import os
+import random
 import re
 import textwrap
+import torch
 from collections import Counter
 from copy import deepcopy
 from typing import Dict, List, Union
 
-import json
-import torch
-
-from swift.llm import PtEngine, RequestConfig, RolloutInferRequest, Template, to_device
-from swift.llm.infer.protocol import ChatCompletionResponse, ChatCompletionResponseChoice
-from swift.plugin import ORM, orms, rm_plugins
-# register context manager(used in gym training)
-from swift.plugin.context_manager import ContextManager, context_managers
-from swift.plugin.env import Env, envs
-from swift.plugin.multi_turn import MultiTurnScheduler, multi_turns
-from swift.plugin.rm_plugin import DefaultRMPlugin
-from swift.utils import get_logger
+from swift.infer_engine import RequestConfig, TransformersEngine
+from swift.infer_engine.protocol import ChatCompletionResponse, ChatCompletionResponseChoice, RolloutInferRequest
+from swift.rewards import ORM, AsyncORM, orms, rm_plugins
+from swift.rewards.rm_plugin import DefaultRMPlugin
+from swift.rollout.gym_env import Env, envs
+from swift.rollout.multi_turn import MultiTurnScheduler, multi_turns
+from swift.template import Template
+from swift.utils import get_logger, to_device
 
 logger = get_logger()
 """
@@ -36,7 +35,7 @@ TO CUSTOMIZE REWARD FUNCTION:
 """
 
 
-# For additional reward functions, refer to swift/plugin/orm.py.
+# For additional reward functions, refer to swift/rewards/orm.py.
 class CountdownORM(ORM):
 
     def __call__(self, completions, target, nums, **kwargs) -> List[float]:
@@ -154,8 +153,9 @@ class MultiTurnThinkingTips(ORM):
     function **must return an identical reward for every fragment**
     """
 
-    def __init__(self):
-        from swift.plugin.orm import MathAccuracy
+    def __init__(self, args=None, **kwargs):
+        super().__init__(args)
+        from swift.rewards.orm import MathAccuracy
         self.acc_func = MathAccuracy()
 
     def __call__(self, completions, **kwargs) -> List[float]:
@@ -183,7 +183,8 @@ orms['thinking_tips'] = MultiTurnThinkingTips
 # ref implementation: https://github.com/huggingface/open-r1/blob/main/src/open_r1/rewards.py
 class CodeReward(ORM):
 
-    def __init__(self):
+    def __init__(self, args=None, **kwargs):
+        super().__init__(args)
         import importlib.util
         assert importlib.util.find_spec('e2b') is not None, (
             "The e2b package is required but not installed. Please install it using 'pip install e2b-code-interpreter'."
@@ -368,7 +369,8 @@ class CodeRewardByJudge0(ORM):
     }
     PYTHON_ID = 71
 
-    def __init__(self):
+    def __init__(self, args, **kwargs):
+        super().__init__(args)
         self.endpoint = os.getenv('JUDGE0_ENDPOINT')
         assert self.endpoint is not None, (
             'Judge0 endpoint is not set. Please set the JUDGE0_ENDPOINT environment variable.')
@@ -457,6 +459,179 @@ class CodeRewardByJudge0(ORM):
 orms['external_code_reward_by_judge0'] = CodeRewardByJudge0
 
 
+class AsyncGenRMReward(AsyncORM):
+    """
+    An async reward function example that calls a generative reward model
+    deployed via `swift deploy`.
+
+    This demonstrates how to use AsyncORM with aiohttp to make parallel API calls
+    to an LLM-based reward model for scoring completions.
+
+    The reward model is prompted to evaluate each completion and output a score
+    in a specific format (e.g., [[score]]).
+
+    Usage:
+        1. Deploy a reward model using swift deploy:
+           ```bash
+           swift deploy --model Qwen/Qwen2.5-7B-Instruct --port 8000 --infer_backend vllm
+           ```
+
+        2. Set environment variable:
+           ```bash
+           export GENRM_API_BASE=http://localhost:8000/v1
+           ```
+
+        3. Use in training:
+           ```bash
+           swift rlhf \
+               --rlhf_type grpo \
+               --external_plugins plugin.py \
+               --reward_funcs async_genrm ...
+           ```
+    """
+
+    def __init__(self, args, **kwargs):
+        super().__init__(args)
+        from openai import OpenAI
+        self.api_base = os.getenv('GENRM_API_BASE', 'http://localhost:8000/v1')
+        self.temperature = float(os.getenv('GENRM_TEMPERATURE', '0.3'))
+
+        # Initialize OpenAI client to get the model name (following deepeyes_plugin pattern)
+        try:
+            self.client = OpenAI(
+                api_key='EMPTY',
+                base_url=self.api_base,
+            )
+            self.model_name = self.client.models.list().data[0].id
+            logger.info(f'AsyncGenRMReward initialized with model: {self.model_name}')
+        except Exception as e:
+            raise RuntimeError('Failed to connect to the model service. Please deploy the model '
+                               "using 'swift deploy --model <model_name> --port 8000 --infer_backend vllm'.") from e
+
+        # System prompt for the generative reward model
+        self.system_prompt = textwrap.dedent("""
+            You are an expert evaluator. Your task is to evaluate the quality of an AI assistant's response.
+
+            Please evaluate the response based on the following criteria:
+            1. Correctness: Is the answer factually correct and logically sound?
+            2. Helpfulness: Does the response address the user's question effectively?
+            3. Clarity: Is the response well-organized and easy to understand?
+
+            After your evaluation, provide a score from 0 to 10, where:
+            - 0-3: Poor quality (incorrect, unhelpful, or confusing)
+            - 4-6: Acceptable quality (partially correct or helpful)
+            - 7-9: Good quality (correct, helpful, and clear)
+            - 10: Excellent quality (perfect response)
+
+            You MUST end your response with the score in this exact format: [[score]]
+            For example: [[7]] or [[10]]
+        """).strip()
+
+    def _build_eval_prompt(self, question: str, completion: str) -> str:
+        """Build the evaluation prompt for the reward model."""
+        return textwrap.dedent(f"""
+            ## User Question
+            {question}
+
+            ## AI Assistant's Response
+            {completion}
+
+            ## Your Evaluation
+            Please evaluate the above response and provide your score.
+        """).strip()
+
+    def _extract_score(self, response: str) -> float:
+        """Extract the score from the reward model's response."""
+        # Look for [[score]] pattern
+        match = re.search(r'\[\[(\d+(?:\.\d+)?)\]\]', response)
+        if match:
+            score = float(match.group(1))
+            # Normalize to [0, 1] range
+            return min(max(score / 10.0, 0.0), 1.0)
+
+        # Fallback: try to find any number at the end
+        match = re.search(r'(\d+(?:\.\d+)?)\s*$', response.strip())
+        if match:
+            score = float(match.group(1))
+            return min(max(score / 10.0, 0.0), 1.0)
+
+        logger.warning(f'Could not extract score from response: {response[:100]}...')
+        return 0.0
+
+    async def _score_single(self, session, question: str, completion: str) -> float:
+        """Score a single completion using the generative reward model."""
+        import aiohttp
+
+        eval_prompt = self._build_eval_prompt(question, completion)
+
+        payload = {
+            'model': self.model_name,
+            'messages': [{
+                'role': 'system',
+                'content': self.system_prompt
+            }, {
+                'role': 'user',
+                'content': eval_prompt
+            }],
+            'temperature': self.temperature,
+            'max_tokens': 2048,
+            'seed': random.randint(0, 1000000),
+        }
+
+        try:
+            async with session.post(
+                    f'{self.api_base}/chat/completions', json=payload,
+                    timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.warning(f'API error {resp.status}: {error_text[:200]}')
+                    return 0.0
+
+                result = await resp.json()
+                response_content = result['choices'][0]['message']['content']
+                return self._extract_score(response_content)
+
+        except asyncio.TimeoutError:
+            logger.warning('API request timed out')
+            return 0.0
+        except Exception as e:
+            logger.warning(f'Error calling reward model API: {e}')
+            return 0.0
+
+    async def __call__(self, completions, messages, **kwargs) -> List[float]:
+        """
+        Score completions using a generative reward model via async API calls.
+
+        Args:
+            completions: List of model-generated responses
+            messages: List of conversation messages (used to extract the question)
+            **kwargs: Additional arguments (unused)
+
+        Returns:
+            List of reward scores in [0, 1] range
+        """
+        import aiohttp
+
+        # Extract questions from messages (assuming the last user message is the question)
+        questions = []
+        for msg_list in messages:
+            question = ''
+            for msg in reversed(msg_list):
+                if msg.get('role') == 'user':
+                    question = msg.get('content', '')
+                    break
+            questions.append(question)
+
+        # Make parallel API calls using asyncio.gather
+        async with aiohttp.ClientSession() as session:
+            tasks = [self._score_single(session, q, c) for q, c in zip(questions, completions)]
+            rewards = await asyncio.gather(*tasks)
+            return list(rewards)
+
+
+orms['async_genrm'] = AsyncGenRMReward
+
+
 # ref implementation: https://github.com/qiancheng0/ToolRL/blob/main/verl/utils/reward_score/rlla.py
 # arxiv paper: https://arxiv.org/abs/2504.13958
 # MAX1STEP30MAX3: enable Two stage reward Setting include Format and Correctness
@@ -465,7 +640,8 @@ orms['external_code_reward_by_judge0'] = CodeRewardByJudge0
 # COARSEREWARD -> Coarse, INTERMEDIATEREWARD -> Intermediate, REFINEDREWARD -> Finegrained
 class ToolUseFormatReward(ORM):
 
-    def __init__(self):
+    def __init__(self, args=None, **kwargs):
+        super().__init__(args)
         self.format_max_possible = 1.0
         self.format_min_possible = 0.0
 
@@ -528,7 +704,8 @@ orms['external_tooluse_format_reward'] = ToolUseFormatReward
 
 class ToolUseLengthReward(ORM):
 
-    def __init__(self):
+    def __init__(self, args=None, **kwargs):
+        super().__init__(args)
         self.length_max_possible = 1.0
         self.length_min_possible = 0.0
 
@@ -567,7 +744,8 @@ orms['external_tooluse_length_reward'] = ToolUseLengthReward
 
 class ToolUseCorrectnessReward(ORM):
 
-    def __init__(self):
+    def __init__(self, args=None, **kwargs):
+        super().__init__(args)
         if str(os.getenv('CORRECTMAX1', 0)) == '1':
             self.tool_max_possible = 1.0
             self.tool_min_possible = -1.0
@@ -728,7 +906,7 @@ TO CUSTOMIZE REWARD MODEL:
         --external_plugins /path/to/plugin.py \
         --reward_model_plugin my_rm_plugin
 
-For GenRM you can refer to swift/llm/plugin/rm_plugin/GenRMPlugin
+For GenRM you can refer to swift/rewards/rm_plugin/GenRMPlugin
 """
 
 
@@ -760,8 +938,8 @@ class QwenLongPlugin(DefaultRMPlugin):
     # ms_dataset: https://modelscope.cn/datasets/iic/DocQA-RL-1.6K
     def __init__(self, model, template, accuracy_orm=None):
         super().__init__(model, template)
-        # initilize PTEngine to infer
-        self.engine = PtEngine.from_model_template(self.model, self.template, max_batch_size=0)  # 0: no limit
+        # initialize TransformersEngine to infer
+        self.engine = TransformersEngine(self.model, template=self.template, max_batch_size=0)  # 0: no limit
         self.request_config = RequestConfig(temperature=0)  # customise your request config here
         self.system = textwrap.dedent("""
             You are an expert in verifying if two answers are the same.
@@ -927,9 +1105,6 @@ class ToolCallScheduler(MultiTurnScheduler):
                 else:
                     raise TypeError(f'Unsupported constant type: {type(node.value)}')
 
-            elif isinstance(node, ast.Num):
-                return node.n
-
             elif isinstance(node, ast.BinOp):
                 left = _evaluate_ast_node(node.left)
                 right = _evaluate_ast_node(node.right)
@@ -1015,15 +1190,14 @@ class ToolCallScheduler(MultiTurnScheduler):
     def step(self, infer_request: 'RolloutInferRequest', response_choice: 'ChatCompletionResponseChoice',
              current_turn: int) -> Dict:
         completion = response_choice.message.content
-        token_ids = response_choice.token_ids
-        loss_mask = [1] * len(token_ids)
+        token_ids, loss_mask, rollout_logprobs = self.prepare_response_continuation(response_choice)
         tool_calls = self._extract_tool_calls(completion)
         # assert len(tool_calls) == 1, 'this scheduler is designed for one tool call per turn'
         tool_results = self._execute_tools(tool_calls)
         # append tool result to the completion
         infer_request.messages[-1]['content'] += (tool_results[0])
 
-        tokenizer = self.infer_engine.default_template.tokenizer
+        tokenizer = self.tokenizer
         result_tokens = tokenizer.encode(tool_results[0], add_special_tokens=False)
         token_ids.extend(result_tokens)
         loss_mask.extend([0] * len(result_tokens))
@@ -1032,6 +1206,7 @@ class ToolCallScheduler(MultiTurnScheduler):
             'infer_request': infer_request,
             'response_token_ids': token_ids,
             'response_loss_mask': loss_mask,
+            'rollout_logprobs': rollout_logprobs,
             'rollout_infos': {
                 'tool_results': tool_results[0],
                 'num_turns': current_turn,
@@ -1048,10 +1223,3 @@ class CustomEnv(Env):
 
 
 envs['custom_env'] = CustomEnv
-
-
-class CustomCtxManager(ContextManager):
-    pass
-
-
-context_managers['custom_ctx'] = CustomCtxManager

@@ -9,10 +9,11 @@ kwargs = {
 
 
 def test_train_eval_loop():
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-    from swift.llm import sft_main, TrainArguments
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
+    from swift import SftArguments, sft_main
     sft_main(
-        TrainArguments(
+        SftArguments(
             model='Qwen/Qwen2.5-0.5B-Instruct',
             dataset=['AI-ModelScope/alpaca-gpt4-data-zh#100'],
             target_modules=['all-linear', 'all-embedding'],

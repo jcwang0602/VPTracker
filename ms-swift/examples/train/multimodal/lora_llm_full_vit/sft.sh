@@ -1,6 +1,5 @@
 # 4 * 22GiB
 # vit/merger lr 1e-5; llm lora lr 1e-4
-# Note: not support resume_from_checkpoint (only support resume_only_model)
 NPROC_PER_NODE=4 \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 MAX_PIXELS=1003520 \
@@ -9,8 +8,7 @@ swift sft \
     --dataset 'AI-ModelScope/coco#20000' \
     --load_from_cache_file true \
     --split_dataset_ratio 0.01 \
-    --train_type custom \
-    --external_plugins 'examples/train/multimodal/lora_llm_full_vit/custom_plugin.py' \
+    --tuner_type lora_llm \
     --torch_dtype bfloat16 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \

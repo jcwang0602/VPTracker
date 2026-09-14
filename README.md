@@ -6,10 +6,9 @@ This repository contains dataset conversion, training launchers, inference, eval
 
 ## Installation
 
-Use Python 3.10 or newer with a CUDA-compatible PyTorch build. Install the exact upstream ms-swift release recorded in [`third_party/ms_swift.lock.json`](third_party/ms_swift.lock.json), then project dependencies:
+Use Python 3.10 or newer with a CUDA-compatible PyTorch build. The repository includes the exact upstream ms-swift release recorded in [`third_party/ms_swift.lock.json`](third_party/ms_swift.lock.json), then project dependencies:
 
 ```bash
-git clone --branch v4.5.3 --depth 1 https://github.com/modelscope/ms-swift.git
 python -m pip install -e ms-swift
 python -m pip install -r requirements-vptrack.txt
 ```

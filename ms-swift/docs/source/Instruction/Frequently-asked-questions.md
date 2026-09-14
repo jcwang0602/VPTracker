@@ -1,983 +1,631 @@
 # 常见问题整理
 
-下面是swift使用过程中遇到的一些常见问题。
+下面是SWIFT使用过程中遇到的一些常见问题。
+
+## 数据集
+
+SWIFT内置150+数据集，可用于预训练、微调、人眼对齐、多模态等各种任务，并支持自定义数据集。详见[主页](https://github.com/modelscope/ms-swift/blob/main/README_CN.md)。
+
+### Q1: SWIFT支持的数据集有哪些？如何使用自定义数据集？如何下载数据集？如何检查数据集？
+- 支持的数据集详见[支持的模型和数据集](https://swift.readthedocs.io/zh-cn/latest/Instruction/Supported-models-and-datasets.html)。
+- 自定义数据集格式及使用方法详见[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)，符合格式的数据集会自动调用swift内置数据预处理器。如果与文档要求格式不一致，请参考已支持的数据集自行转换格式。若自定义数据集中有额外的字段，这些字段默认不会被使用，可以通过`--remove_unused_columns`进行额外的设置。
+- 需要下载数据集，然后通过路径指定方式使用时，可以通过`git clone`下载到本地，通过 dataset_info.json 文件中的`dataset_path`字段指定。具体请查看[自定义数据集文档](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html#dataset-info-json)。数据集的下载模式可以选择重新下载或重用上次下载，通过`--download_mode`指定。
+- 对数据集进行错误检查，请设置命令行参数`--strict True`。需要数据集质检工具时，可以查看另一个库[data-juicer](https://github.com/modelscope/data-juicer)。数据随机可以使用`--dataset_shuffle true`。
+更多说明请在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中搜索对应参数。
+
+### Q2: 常见数据集报错
+- 由于datasets底层pyarrow对于类型管控较为严格，图像grounding数据集的objects部分、agent数据集的tools部分等，需要使用str类型，否则会报错每行的类型不一致。
+- 训练中如果遇到报错`AttributeError:’TrainerState’ object has no attribute ’last_model_checkpoint’`，可能是因为数据集过少，导致数据数量不足一个step，可以尝试扩充数据集解决。同理，切分的验证集数据很少时也会有类似报错。
+- 下面是一个assistant字段为空导致的报错：
+```shell
+File "/your_workspace/ms-swift/swift/1lm/dataset/preprocessor/core. py", line 69, in _check_messages raise
+ValueError(f'assistant_message; {assistant_message}')
+ValueError: assistant_message: {'role' :'assistant', 'content': ''}
+```
+如果是推理使用，可以直接删掉空assistant message。
+
+### Q3: 从缓存加载数据集相关问题
+设置命令行参数`--load_from_cache_file True`，可以加快数据集的加载速度（非初次加载），尤其是在多模态数据集、数据集本身数据量较大等场景。在debug或修改preprocessor时，设置为false，以确保代码改动生效。更多说明请在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中搜索该参数。
+
+### Q4: 多模态模型数据集相关问题
+- 多模态模型训练的[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/multimodal)。支持纯文本或图文数据训练，也支持两种数据混合进行训练。图像、视频、音频相关的参数，如，最大像素、fps等请查看[特定模型参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id19)。
+- Grounding任务中通用数据格式支持了一个物体对应多个bbox，参考文档[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html#grounding)。训练时SWIFT会对超过`--max_pixels`的图像进行调整，并保存预处理前和后的图像，同时对bbox进行调整，推理阶段不会进行调整，需要提前手动处理图像。
+
+### Q5: 大规模数据集相关问题
+数据集太大了，然后每次tokenize都需要很久，请使用`--lazy_tokenize True`或流式读取`--streaming True`，详见[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
+
+### Q6: 数据集流式加载相关问题
+流式加载`--streaming True`，一边训练一边加载，需要设置max_steps，详细说明请在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id4)中搜索该参数。<br>
+注意：
+- streaming是不随机的，也不划分验证集，验证集通过命令行参数`val_dataset`指定。
+- 断点续训时，流式只能往前索引，不能随机索引，跳过已经训练的数据耗时特别长，不建议用流式。
+
+### Q7: 数据集多进程处理
+多模态数据集map比较慢是正常的，可以设置参数`--dataset_num_proc`开多进程提速。
 
 ## 训练
 
-### Q1: Swift微调支持的模型和数据集有哪些？
-详见文档[支持的模型和数据集](https://swift.readthedocs.io/zh-cn/latest/Instruction/Supported-models-and-datasets.html)。
+SWIFT支持的训练方法包括预训练、指令监督微调、偏好学习、GRPO、Embedding、Reranker、序列分类任务等，详见[主页](https://github.com/modelscope/ms-swift/blob/main/README_CN.md)。
 
-### Q2: 使用自定义数据集训练时支持的数据格式有哪些？
-自定义数据集格式见文档[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)。
-
-### Q3: 自定义数据集dataset_info.json格式，如何通过这种方式使用自定义数据集？
-dataset_info.json格式见文档[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)。命令行，`--custom_dataset_info xxx.json`，`--dataset <dataset_id_or_path>`。
-
-### Q4: 如何在界面训练使用自定义数据集？
-界面训练使用自定义数据集与命令行一致，参考文档[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)。
-
-### Q5: 数据集jsonl文件里的一行能不能写成这样？{"index": "00000", "query": "11111", "response": "22222", 'source':'qqq'}
-可以有额外字段的，这些字段默认不会被使用。详见[命令行参数remove_unused_columns](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id4)。
-
-### Q6: 命令行参数在哪个文档中查看？
-详见文档[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q7: 离线环境训练需要配置的参数有哪些？
-`--model 本地路径`，`--check_model false`，详见[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q8: model_type在哪儿查看？
-查看文档[支持的模型和数据集](https://swift.readthedocs.io/zh-cn/latest/Instruction/Supported-models-and-datasets.html)。
-
-### Q9: 模型训练完能直接转gguf格式吗？
-目前只支持导出ModelFile，详见文档[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q10: swift支持预训练吗，我看只有sft？
-支持，命令行`swift pt`，[预训练例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/pretrain)，数据集格式见[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)。
-
-### Q11: 想问一下用lora微调的模型，如果想断点续训的话，是应该先把它合成一整个模型吗，还是可以不合起来，直接通过路径来指定原模型和lora块
-不合并，`--resume_from_checkpoint output/xxx/vx-xxx/checkpoint-xxx`，详见[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q12: 我想控制一下从网上下载下来的原始模型权重的位置，怎么才能做到把原始的模型放在指定的文件夹里呢？
-可以配置环境变量`MODELSCOPE_CACHE=your_path`将原始的模型存到指定路径；如果用sdk下载，通过`cache_dir="本地地址"`；也可以使用`modelscope download`命令行工具或`git`下载，详见modelscope文档[模型下载](https://modelscope.cn/docs/models/download)。训练时`--model`配置本地路径即可。如果需要在离线环境训练，配置`--check_model false`，详见[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q13: 有人在用ms-swift遇到过这个问题？
+### Q1: 如何搭建SWIFT环境？如何离线安装SWIFT？有镜像可以使用吗？
+- 环境搭建详见[SWIFT安装文档](https://swift.readthedocs.io/zh-cn/latest/GetStarted/SWIFT-installation.html)，一些常见依赖的推荐版本可以在[GitHub主页](https://github.com/modelscope/ms-swift/blob/main/README_CN.md)上找到。
+- SWIFT离线安装流程：
 ```text
-[rank6]: pydantic_core._pydantic_core.ValidationError: 1 validation error for DeepSpeedZeroConfig
-[rank6]: stage3_prefetch_bucket_size
-[rank6]: Input should be a valid integer, got a number with a fractional part [type=int_from_float,input_value=11560550.4，in put_type=float]
-[rank6]: For further information visit https://errors.pydantic.dev/2.8/v/int_fro_float
+1、git clone下来（需要联网）
+2、在本地pip install -e .
 ```
-`deepspeed`版本降到`0.14.*`。
-
-### Q14: 有微调qwen-2-vl的完整的教程和命令行吗？
-参考多模态模型训练的[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/multimodal)。
-
-### Q15: 多模态大模型微调有什么支持的trick吗，类似llm的neftune?
-`piassa/olora/dora`这些`lora`的变种或者`fourierft`都可以尝试。参考`sft`参数里面的各种trick，有一些不一定在多模态上适用。
-
-### Q16: 训练过程中eval得到的acc和对应保存的ckpt去重新推理一遍计算得到的acc不是一致的
-训练时候的eval_acc和推理时候的acc 计算方式不一样的。`acc_strategy`: 默认为`'token'`, 可选择的值包括: `'token'`, `'seq'`.
-
-### Q17: 魔搭官方镜像与swift环境
-`docker run`命令启动容器即可，如：`docker run --gpus all -p 8000:8000 -it -d --name ms modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.4.0-py311-torch2.6.0-1.26.0-LLM /bin/bash`，启动容器后拉最新代码安装swift。另外，针对大模型训练场景，提供了`ms-swift`镜像，额外增加了`Megatron-SWIFT`的依赖，如：`modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.4.0-py311-torch2.6.0-vllm0.8.5.post1-modelscope1.26.0-swift3.4.1.post1`，详见[swift安装文档](https://swift.readthedocs.io/zh-cn/latest/GetStarted/SWIFT-installation.html)。
-
-### Q18: 多机多卡训练命令行
-详见[多机多卡例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/multi-node)
-
-### Q19: 如何选择template?
-见[issue](https://github.com/modelscope/ms-swift/issues/1813)。
-
-### Q20: 多卡训练torchrun和swift sft如何使用？
-`swift sft`走的就是`torchrun`。
-
-### Q21: 有个问题，因为我的sft数据集太大了，然后每次tokenize都需要很久，有解决方案吗？
-使用`lazy_tokenize`或流式读取`streaming`，详见[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q22: 训练时，如果两个数据集直接追加一起放在训练集中，模型在训练的时候内部会有shuffle的流程吗？还是按顺序取数据去训练？
-命令行参数`dataset_shuffle`，详见[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q23: 如果模型两张卡，数据不开并行，deepspeed就会出现报错，怎么处理呢？
-`deepspeed` 和 `device_map`是不兼容的，两个只能选1个。
-
-### Q24: vlm模型训练如何减少显存使用？
-配置`--freeze_vit true`，以及限制最大像素的参数`--max_pixels`。
-
-### Q25: 没有适配model_type的模型，sft时可以自定义special_tokens和chat_template吗？
-可以。参考接入模型的PR以及自定义模型数据集文档。
-
-### Q26: 可以在python脚本里面用DPO去训练qwen2-vl吗？
-可以。从`swift.llm`中导入`rlhf_main` 和`RLHFArguments`。
-
-### Q27: 请问训练MLLM时，可否先进行纯文本的预训练，然后接入VQA数据集进行微调呢？
-可以。也可以混着训练。
-
-### Q28: 基于qwen2的sft模型进行dpo训练，v100的机器，训练时都是Nan呢？
-V100机器要用fp32训练qwen2。
-
-### Q29: 想问一下，swift，能支持蒸馏吗？
-参考这个[例子](https://github.com/modelscope/ms-swift/blob/main/examples/sampler/distill/distill.sh)。
-
-### Q30: 当前训练完默认最多保存两个checkpoint，如果想多保存几个应该怎么修改呢？
-`--save_total_limit`，详见[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q31: Grounding任务中通用数据格式支持一个类别有多个实例吗？
-目前均支持了一个物体对应多个bbox，参考文档[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html#grounding)。
-
-### Q32: 这个错误为什么会出现在这，numpy.object找不到在哪？
-`numpy==1.26.3`，尝试一下。
-
-### Q33: swift框架能支持序列并行了吗？
-支持。参考这里的[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/sequence_parallel)。
-
-### Q34: 用v100微调qwen2-1.5B时，loss': 0.0, 'acc': 0.0, 'grad_norm': nan，是什么问题呢?
-尝试用fp32。
-
-### Q35: gptq量化模型，能全参数微调吗？
-不能。gptq模型的int型参数无法参与求导，只能附着lora等额外结构参与更新。
-
-### Q36: 请问如果想用qlora的方式微调的话应该如何设置参数呢?glm4-chat
-参考qlora[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/qlora)。
-
-### Q37: 请教一个问题，我应该如何在swift框架下扩充我的词表呢？
-详见[命令行参数new_special_tokens](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id3)。
-
-### Q38: 同名的模型是可以直接使用huggingface上的吗？
-设置环境变量`USE_HF=1`。
-
-### Q39: 请问Qwen2-VL-2B能进行增量预训练吗？有指导文件吗?有图文,也有纯文本的。
-支持，按[自定义数据集文档](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)中的格式组织数据就行。
-
-### Q40: 请问下用视频做训练的时候，如何在参数中控制抽帧率，设了frame_rate设不起, minicpmv
-设置环境变量`MAX_NUM_FRAMES`。
-
-### Q41: swift在训练的时候，可以把验证集的推理结果保存下来吗？
-训练结束后，运行swift infer，会保存。
-
-### Q42: 我全量full参数dpo，为何保存的checkpoint 比原本模型文件要大呢?整整大了1倍
-用V100微调，存的是fp32类型。
-
-### Q43: 多机训练速度缓慢，在使用swift框架进行LLM训练时，发现采用deepspeed zero3训练会出现严重的速度下降问题
-详见[issue](https://github.com/modelscope/ms-swift/issues/1825)。
-
-### Q44: swift现在是支持qwen2-vl多阶段预训练的吗？我看官方的最佳实践里的sft好像都是vit+llm一起训的，不知道支不支持单独finetune
-`--freeze_vit`，`--freeze_aligner`，`--freeze_llm`这几个参数可以控制，详见[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#tuner)。
-
-### Q45: qwen2-vl是不是不支持混合纯文本数据?
-支持图文和纯文本。
-
-### Q46: 微调的时候可以绘制不同数据集的loss曲线吗？
-支持channel loss，参考`--enable_channel_loss`。
-
-### Q47: 模型训练后，回复重复了很多内容
-参考[预训练与微调](https://swift.readthedocs.io/zh-cn/latest/Instruction/Pre-training-and-Fine-tuning.html)。如果训练过程中出现重复的情况，请多训练几个epoch, 清洗数据, 全参数训练, 采用RLHF的方式缓解。
-
-### Q48: 想问一下swift目前支持prompt tuning或者prefix tuning吗？
-不支持，这两个方法知识遗忘比较严重，目前不推荐使用。
-
-### Q49: 两张A10训练报错如下：
-```text
-[rank0]: torch.distributed.DistBackendError: NCCL error in:../torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:1970， unhandled system error (run with NCCL_DEBUG=INFO for details),NCCL version 2.20.5
-[rank0]:ncclSystemError: System call (e.g. socket,malloc) or external library call failed or device error.
-```
-请检查共享内存是否太小，nccl需要共享内存。
-
-### Q50: 请问在采用DDP微调训练的过程中，冻结某些层时导致的某些参数未参与梯度回传问题怎么解决？
-配置参数`--ddp_find_unused_parameters true`。
-
-### Q51: swift有没有数据集质检工具？
-[data-juicer](https://github.com/modelscope/data-juicer)。
-
-### Q52: web端在哪启动模型并行?只找到了数据并行的勾选项，没找到模型并行在哪。
-指定可见显卡就可以。
-
-### Q53: 设置--dataset的话，怎么让数据集下载到固定位置，我在命令行参数没找到，下次如果再次读取的话如何可以从下载的地方读取
-`dataset_path`支持文件夹，一般是`git clone`下载下来的数据集文件夹。详见[自定义数据集文档](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html#dataset-info-json)。
-
-### Q54: --streaming true，我设置num_train_epochs会报错让我设置max_steps。不可以只设置num_train_epochs吗？
-详见`streaming`参数说明，[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id4)。
-
-### Q55: 好奇tools为啥是"[]"，不是直接支持[]呢，能否帮忙解答一下，这个tools为啥是"[]"这种格式呢，不是直接使用[]呢，有些不理解
-这是因为datasets的底层pyarrow对于类型管控比较严格。我们官方的grounding数据集的objects部分也是因为这个原因要用str，要不pyarrow就会报错：你每行的类型不一致。
-
-### Q56: 这个参数不能用吗？check_dataset_strategy==discard
-swift3.0没这个参数了，用`strict`参数。
-
-### Q57: 运行sft命令出现报错如下：
-```text
-RuntimeError: Expected to mark a variable ready only once.This error is caused by one of the following reasons: 1) Use of a module parameter outsid forward function. Please make sure model parameters are not shared across multiple concurrent forward-backward passes. or try to use _set_static_graph( ) as round if this module graph does not change during training loop.2) Reused parameters in multiple reentrant backward passes. For example, if you use multiple oint` functions to wrap the same part of your model, it would result in the same set of parameters been used by different reentrant backward passes multiple and hence marking a variable ready multiple times. DDP does not support such use cases in default. You can try to use _set_static_graph( ) as a workaround if dule graph does not change over iterations.
-```
-加一下这个参数，`--gradient_checkpointing_kwargs '{"use_reentrant": false}'`。或者升级ms-swift，默认设置了这个参数。
-
-### Q58: 有遇到过这个问题嘛？AttributeError:’TrainerState’ object has no attribute ’last_model_checkpoint’
-数据集太少了，增加一些。数据数量不足一个step导致的报错。
-
-### Q59: 我看到custompreprocessor里面可以定义preprocess，这个是在训练开始前全部会处理好，还是一边训练一边加载的啊
-如果设置了参数`--streaming true`，就是一边训练一边加载。默认是全部处理完然后训练。
-
-### Q60: 全参数训练internvl2_5，为啥里面的 freeze parameters默认就有vision_model 和 mlp1？我看命令行参数的文档里面freeze parameters默认为[],命令中显示设置 freeze vit， freeze aligner， freeze llm都为False，又会打印出来trainable parameters：[‘mlp1’] 也不知道是指只有mlp1可以train 还是 所有的paras都可以train 只是mlp1打印一下
-先freeze parameters再active parameters。`freeze vit/freeze aligner/freeze llm`这三个参数会对freeze parameters 和trainable parameters进行调整.因为有些模型的`vit`中包含`aligner`，所以会将`aligner`单独加入trainable_parameters。
-
-### Q61: 请问swift中的llamapro对多模态做适配了吗？
-支持的。
-
-### Q62: 我发现2.x支持MAX_PIXELS，3.x文档里有个--max_pixel参数是一个意思吗，他的处理逻辑是啥样的？我用12000*9000的图片，2.x设置resacle_image训练internvl还是会崩
-环境变量的参数是对应模型的参数，`MAX_PIXELS`只支持qwen2vl的，internvl有自己的环境变量参数，详见[特定模型参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id18)。
-
-### Q63: 从qwen base模型微调成chat模型有没有实践文档，有什么要特别配置的吗?
-`swift sft`，没有其他需要特别配置的，参考[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/base_to_chat)。
-
-### Q64: sequence parallel例子在哪呀？
-看这个例子[sequence_parallel](https://github.com/modelscope/ms-swift/tree/main/examples/train/sequence_parallel)。
-
-### Q65: swift能支持训练自己定义的模型结构吗？
-可以的，只需要自定义`get_model_tokenizer_xxx`函数就好了，返回`model`和`tokenizer`。
-
-### Q66: 我用"name_or_path": "/mnt/workspace/model/Qwen2.5-14B-Instruct"跑longlora 发现出现了报错，不会是只有个llama系列可以使用longlora吧
-只有llama系列能用`longlora`。
-
-### Q67: 想问下swift怎么加入自己的special token？
-详见[命令行参数文档new_special_tokens](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id3)。
-
-### Q68: --freeze_parameters_ratio这个参数，如果设定为0.7，是不是说明训练的时候只更新llm的30%的参数？是随机更新30%吗，这个参数更新的机制是什么呀？
-从下往上freeze。
-
-### Q69: map过程为啥这么慢，这是正常的吗？
-```text
-Map: 4%|██ | 9000/203823 [02:18<50:34, 64.19 examples/s]
-```
-设置参数`--dataset_num_proc`可以开多进程。
-
-### Q70: 请问数据集如何能够删除重新下载，感觉数据集出了点问题
-设置参数`--download_mode`。
-
-### Q71: 请问这个问题如何解决？safetensors_rust.SafetensorError: Error while deserializing header: HeaderTooLarge
-磁盘空间不足了，模型没有保存完整。
-
-### Q72: swift3.0不支持get_default_template_type是吗？
-请查看`model.model_meta.template`，信息都存在`model.model_meta和model.model_info`。
-
-### Q73: 请问默认模型训练都是left padding是吧?
-训练可以选择使用左padding还是右padding。默认是右padding, `batch infer`都是左padding。
-
-### Q74: 请问下现在支持grounding任务了吗
-examples下有[例子](https://github.com/modelscope/ms-swift/blob/main/examples/train/multimodal/grounding.sh)。
-
-### Q75: 请问现在ms-swift支持对比学习，从而训练llm_emb吗?
-支持，[例子](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding)。
-
-### Q76: 话说直接从peft和trl库，手搓微调和grpo代码和swift官方在同参数下进行训练，效果差异大吗？
-区别不大，额外支持了多模态。
-
-### Q77: swift 目前不支持 minicpmo2_6 使用音频模态输入的训练吗？会报错： assert media_type in {'image', 'video'}
-目前不支持音频。
-
-### Q78: swift可以微调deepseek R1 671B吗？
-可以，template是接入了的，不过过程会比较麻烦，要先fp8转bf16。
-
-### Q79: 最新的swift框架不是通过这个命令来指定模型的位置的么？这是我已经下载好的模型位置，不知道为什么还要下载，还下不下来，提示报错git clone
+- [SWIFT安装文档](https://swift.readthedocs.io/zh-cn/latest/GetStarted/SWIFT-installation.html)中提供了镜像地址，用`docker pull`拉取、`docker run`命令启动容器即可，如：
 ```shell
---model /mnt/workspace/.cache/modelscope/hub/deepseek-ai/deepseek-vl2/ \
+# 拉取镜像
+docker pull modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda13.0.3-py312-torch2.11.0-vllm0.23.0-modelscope1.38.1-swift4.4.1
+# 后台拉起容器，-d会使容器在后台长期运行
+docker run --gpus all -p 8000:8000 -dit --name ms modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda13.0.3-py312-torch2.11.0-vllm0.23.0-modelscope1.38.1-swift4.4.1 /bin/bash
+# 进入容器
+docker exec -it ms /bin/bash
 ```
-有些需要clone repo，然后通过`local_repo_path`指定。
+启动容器后拉SWIFT最新代码安装即可。
 
-### Q80: swift现在支持多模态的grpo吗？
-支持。
+### Q2: SWIFT支持的模型有哪些？如何下载模型？如何设置模型存储路径？
+- 支持的模型详见[支持的模型和数据集](https://swift.readthedocs.io/zh-cn/latest/Instruction/Supported-models-and-datasets.html)。
+- 如果模型已经下载到了本地，可以通过设置`--model <model_path>`使用。对于离线环境训练，需要同时设置`--model <local_path_to_model>`和`--check_model false`。如果提示git clone相关报错，可以通过`--local_repo_path <local_repo_path>`指定本地repo。
+- 从ModelScope下载的模型，可以通过配置环境变量`MODELSCOPE_CACHE=your_path`将模型存到指定路径。如果用ModelScope SDK下载，同样可以通过`--cache_dir="local_path"`来指定模型存放路径。模型下载还可以使用`modelscope download`命令行工具或`git`下载，详见modelscope文档中的[模型下载](https://modelscope.cn/docs/models/download)。如果需要从Hugging Face下载模型，需要设置环境变量`USE_HF=1`。
+- SWIFT会自动匹配model_type，也可以查看[支持的模型和数据集](https://swift.readthedocs.io/zh-cn/latest/Instruction/Supported-models-and-datasets.html)，手动指定。
+更多说明请在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中搜索对应参数。
 
-### Q81: grpo的reward函数支持自己定义么?
-支持，参考[examples/train/grpo/plugin](https://github.com/modelscope/ms-swift/tree/main/examples/train/grpo/plugin)。
+### Q3: template相关问题
+- 由于jinja chat template没有labels，所以目前不支持该template的训练。
+- 多模态数据集如果需要在加载数据之后做动态数据增强（例如，给输入数据随机添加噪声等），请在template中修改`encode`方法。
 
-### Q82: 请问为什么 --torch_dtype float16 （卡不能使用bf16）会出现报错：lib/python3.12/site-packages/torch/amp/grad_scaler.py", line 260, in _unscale_grads_ raise ValueError("Attempting to unscale FP16 gradients.") ValueError: Attempting to unscale FP16 gradients.
-全参数，不能fp16训练的。
-
-### Q83: 请教一个问题。我用swift训练了一个reward模型（基线是qwen2.5-7b），然后用在ppo或者grpo中加载会报错。reward模型是lora训练的。
+### Q4: SWIFT训练如何debug？
+可以使用以下方式进行debug，这与使用命令行微调是等价的，但此方式不支持分布式。微调命令行运行入口可以查看[这里](https://github.com/modelscope/ms-swift/blob/main/swift/cli/sft.py)。
 ```shell
---rlhf_type ppo \
---model Qwen/Qwen2.5-14B-Instruct \
---reward_model /mnt/workspace/output/rm/model --train_type lora \
---dataset 'AI-ModelScope/alpaca-gpt4-data-zh#20000' --torch_dtype float32 --num_train_epochs 1 \
---per_device_train_batch_size 1 --per_device_eval_batch_size 1 --learning_rate 1e-5 --lora_rank 8 --lora_alpha 32 \
---target_modules all-linear \
---gradient_accumulation_steps 16 --eval_steps 100 --save_steps 100 \
+from swift import sft_main, SftArguments
+result = sft_main(SftArguments(
+    model='Qwen/Qwen2.5-7B-Instruct',
+    tuner_type='lora',
+    dataset=['AI-ModelScope/alpaca-gpt4-data-zh#500',
+             'AI-ModelScope/alpaca-gpt4-data-en#500',
+             'swift/self-cognition#500'],
+    torch_dtype='bfloat16',
+    # ...
+))
 ```
-lora训练的reward model需要merge一下。
 
-### Q84: 各位大佬，请问要微调deepseek_vl2，transformers用什么什么版本？官方文档说<4.42，但是4.42及以下也报错。peft版本也要降低吗？
-`peft==0.11.*`。
+### Q5: SWIFT如何使用python脚本训练？
+参考[notebook示例](https://github.com/modelscope/ms-swift/tree/main/examples/notebook)。
 
-### Q85: 请问generate train split太慢了有没有什么好办法呀（大概有30多个数据集，总数据量百万左右）。之前swift 2.x好像没有这么慢。lazy tokenize 已经开了
-设置`--dataset_num_proc 16`。
+### Q6: SWIFT如何使用UI界面训练？
+- 使用`swift web-ui`命令启动UI界面，界面训练、自定义数据集使用与命令行一致，界面上的参数请查看[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
+- Megatron-SWIFT不支持UI界面训练。
 
-### Q86: 请问下微调qwen2.5vl的时候，我想使用全参数微调visual encoder同时使用LoRA微调LLM，怎么实现呢？
-参考这里[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/multimodal/lora_llm_full_vit)。
- 
-### Q87: 问一下，swift怎么使用自定义的损失函数？
-plugin中加就可以了。
+### Q7: 多模态模型训练相关问题
+- VLM模型训练如果需要减少显存使用，请配置`--freeze_vit true`，以及限制最大像素`--max_pixels`。如果没有训练VIT，抛出`warning: none of the inputs have requires_grad=True`是正常的，如果训练了，则不应该抛出。
+- `--freeze_vit`，`--freeze_aligner`，`--freeze_llm`这几个参数详见[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#tuner)。
+- 全参数微调visual encoder+LoRA微调LLM，参考[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/multimodal/lora_llm_full_vit)。
 
-### Q88: 请问下MoE的参数有哪些，参数表里关键字搜索不到？专家数量，专家路由这些参数怎么设置？
-直接用config.json中的参数。
+### Q8: 单机多卡训练相关问题
+SWIFT多卡训练底层依赖torchrun。`deepspeed` 和 `device_map`不兼容，两个只能选1个。更多细节请查看代码库中的[单机多卡例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/multi-gpu)。
 
-### Q89: grpo训练中使用lmdeploy会报相关函数不存在的问题，想请教下具体问题，在lmdeployengine类里面确实没找到load_weights这个函数
-只在turbomind引擎下支持。
+### Q9: 多机多卡训练相关问题
+- 多机多卡训练时，只有主节点有日志。更多细节请查看代码库中的[多机多卡例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/multi-node)。
+- 多机训练速度缓慢，如，使用DeepSpeed ZeRO3训练会出现严重的速度下降，请查看[issue](https://github.com/modelscope/ms-swift/issues/1825)。
 
-### Q90: Moonlight-16B-A3B-Instruct, 我在微调这个模型的时候报错怎么办?ms-swift好像不支持这个模型进行微调
-因为是模型文件中禁止了训练, 参考deepseek_vl2的解决方案，你搜搜issue。
+### Q10: 断点续训相关问题
+- 先前训练脚本中的参数不变，加上`--resume_from_checkpoint output/xxx/vx-xxx/checkpoint-xxx`即可，权重等相关信息将在trainer中读取。
+- 如果希望仅加载模型，请同时设置`--resume_only_model`来忽略优化器状态和随机种子。
+- 更复杂的场景，请在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中搜索参数关键词`resume`。
 
-### Q91: 训练时出了这个错应该咋解决？RuntimeError: “triu_tril_cuda_template“ not implemented for ‘BFloat16'
+### Q11: packing相关问题
+- packing要和flash_attn一起使用，不然attention_mask会出问题，导致误差。
+- Qwen3.5模型中的linear-attention不支持var_len，不建议开启packing。
+- 开启packing时，多模态数据会有两次mapping，map完数据集之后还会进行template的mapping。如果速度非常慢，可以设置`OMP_NUM_THREADS=14`加速，或者可以把packing去掉，就不会map第二次了。
+
+### Q12: 当前训练完默认保存多少个checkpoint？
+默认保存所有的checkpoint，详见[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中的save_total_limit。
+
+### Q13: 训练过程中loss相关问题
+- 自定义损失函数的.py文件在使用时通过`--external_plugins`参数导入：
 ```shell
-CUDA_VISIBLE_DEVICES=01,2,3,4,5,6,7 \
 swift sft \
-    --model Internlm3-8b \
-    --dataset train.json \
-    --train_type full \
-    --torch_dtype bfloat16 \
-    --num_train_epochs 5 \
-    --per_device_train_batch_size 1 \
-    --deepspeed zero3 \
-    --per_device_eval_batch_size 1 \
-    --learning_rate 1e-4 \
-    --gradient_accumulation_steps 16 \
-    --eval_steps 100 \
-    --save_steps 100 \
-    --save_total_limit 5 \
-    --logging_steps 5 \
-    --max_length 2048 \
-    --output_dir output \
-    --warmup_ratio 0.05 \
-    --dataloader_num_workers 4
+    --external_plugins /path/to/plugin.py \
+    --loss_type my_loss \
+    # ...
 ```
-升级torch。
+其中`--loss_type`对应的值为loss_map中注册的自定义损失函数对应key；lose_scale同理，需要注册在loss_scale_map中。
+- 如果需要不同数据集的loss曲线，请设置`--enable_channel_loss`。更多说明请在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中搜索该参数。
+- 可以在[loss_map](https://github.com/modelscope/ms-swift/blob/main/swift/loss/mapping.py)中查看当前支持的loss或添加新的loss
+- 如需检查`<image>`等特殊token是否参与损失计算，可以在命令行日志中找打印出的labels对应检查。
+- 训练agent时，`tool_call`算loss，`tool_response`不算loss。
 
-### Q92: grpo训练，loss和grad_norm全是0，正常的吗？
-```text
-{'loss':    0.0.    'grad norm':0.0,    'learning_rate':9e-08,    'memory(GiB)':88.1，    'train_speed(iter/s)':0.009252，    'completion_length':    150.00000763，    'response_clip ratio': 0.0,    'rewards/Format':1.0,    'reward
-: 1.0,    'reward std':0.0，    'kl': 0.0, 'clip_ratio': 0.0,    'epoch': 0.0， 'qlobal step/max steps':'1/1052'，    'percentage':'0.10%    'elapsed time':    '36s    'remaining time': '10h 43m 54s'}
-{'loss': 0.0，'grad_norm':0.0，'learning_rate': 1.8e-07,'memory(GiB)':94.15，'train_speed(iter/s)':0.014782，'completion_length': 133.25000763，'response_clip_ratio': 0.0，'rewards/Format': 1.0, 'rewa rd': 1.0，'reward_std': 0.0, 'kl': 0.0，'clip_ratio': 0.0,'epoch': 0.0, 'global_step/max_steps': '2/1052'，'percentage': '0.19%', 'elapsed_time': '1m 3s'， 'remaining_time': '9h 19m 49s'}
-{'loss': 0.0， 'qrad norm': 0.0, 'learning rate': 2.7e-07,'memory(GiB)': 94.15，'train_speed(iter/s)': 0.018695，'completion_length': 123.08333969，，'response_clip_ratio': 0.0，'rewards/Format': 1.0, 'rewa rd': 1.0， 'reward_ std': 0.0,'kl': 0.0,'clip_ratio': 0.0， 'epoch': 0.0， 'global_step/max_steps': '3/1052'，'percentage': '0.29%，'elapsed_time': '1m 29s'，'remaining_time': '8h 39m 34s'}
-```
-训练过程中loss接近0是正常情况，参考[issue](https://github.com/huggingface/open-r1/issues/239#issuecomment-2646297851)。
+### Q14: 训练过程中acc相关问题
+- 如果eval得到的acc和对应ckpt重新推理一遍计算得到的acc不一致，可能是因为训练时候的eval_acc和推理时候的acc计算方式不一样导致的。检查一下`--acc_strategy`参数，默认为`'token'`, 可选择的值包括: `'token'`，`'seq'`。
+- 有些模型训练过程中没有token_acc是因为`logits`和`labels`数量对不上。
 
-### Q93: 请教一下这个grpo的内置奖励函数，从哪里可以传入accuracy_orm
-目前是直接改代码。
+### Q15: 模型参数freeze相关问题
+- DDP多卡训练的过程中，冻结某些层时导致某些参数未参与梯度回传，请配置`--ddp_find_unused_parameters True`自动跳过没有梯度的参数。
+- `--freeze_parameters/--freeze_vit/--freeze_aligner/--freeze_llm`：这四个参数设置的freeze_parameters在使用的过程中允许被后执行的activate_parameters覆盖，即参数解冻优先级更高。
+- `--freeze vit/--freeze aligner/--freeze llm`这三个参数会对freeze parameters进行调整。因为有些模型的ViT中包含aligner，`--freeze aligner False`时会同步调节trainable parameters，将`aligner`单独加入其中确保不被冻结。
+- `--freeze_parameters_ratio`这个参数的机制是从embedding开始从下往上冻结参数。
 
-### Q94: 我看这奖励函数有solution参数，是要从数据集里面传过来吗？就是我数据集必须有solution这项？
-是的，针对math问题，不然不好算accuracy。
+### Q16: 序列并行相关问题
+- pt，sft，dpo，grpo均支持sequence parallel。命令行例子请参考[sequence_parallel](https://github.com/modelscope/ms-swift/tree/main/examples/train/sequence_parallel)。
+- VLM模型目前仅支持flash-attn，纯文本支持flash-attn和sdpa。
+- sequence parallel可以和Liger kernel同时使用。
+- sequence parallel下自定义loss不起作用时，可能是由于sequence parallel走了自己的loss，可以根据情况修改[per_token_loss_func_sp](https://github.com/modelscope/ms-swift/blob/main/swift/trainers/utils.py)。
 
-### Q95: 训练为什么没有token_acc？
-有些模型`logits`和`labels`数量对不上，就不算的。
+### Q17: 扩充词表
+用SWIFT框架扩充词表需要设置命令行参数`--new_special_tokens <path/to/tokens.txt>`配合`--modules_to_save embed_tokens lm_head`来解冻对应参数进行训练，详见[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/new_special_tokens)。
 
-### Q96: 微调Ovis2 使用lora参数不起作用？加不加--train_type lora \，好像都是全参数微调？显存没变化。
-`--max_length`限制一下，这个模型有点特殊，需要padding到max_length。
+### Q18: tuners相关问题
+- SWIFT中的LlamaPro对多模态做了适配。
+- LongLoRA因为依赖架构中的特定组件，所以只有LLaMA系列模型能用。
+- LoRA训练和`--trainable_parameters`参数不兼容，需要额外训练LoRA模块之外的其他参数用`--modules_to_save`。
 
-### Q97: 请问下用qwen2.5跑一个分类任务，抱下面的错误，是哪里配置的有问题呢？ValueError: The model did not return a loss from the inputs, only the following keys: logits. For reference, the inputs it received are input_ids,attention_mask.
-数据集是这样的：{"messages": [{"role": "user", "content": "xxxxx"}, {"label": 1}]}
-`label`写在`message`同级。
+### Q19: embedding/reranker训练相关问题
+- [embedding训练例子](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding)。
+- [reranker训练例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/reranker)。
+- embedding/reranker数据格式见[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)。
 
-### Q98: 启动了VllmEngine，要如何退出呀？就是调用了engine，模型就被载入显存准备工作。但是我推理完想要engine释放显存。下次调用时，再加载。而不是一直占用
-sleep mode啊，支持的。`engine.sleep(level=1)/engine.wake_up()`，构造的时候加一个`enable_sleep_mode=True`。
+### Q20: classification训练相关问题
+- 需设置`--num_labels`、`--problem_type`。详细介绍在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中搜索对应参数。
+- 多标签分类数据格式见[自定义数据集](https://swift.readthedocs.io/zh-cn/latest/Customization/Custom-dataset.html)。<br>
+注意：数据集中label字段和message字段同级。
 
-### Q99: 求问，streaming模式下，trainer_sampler_random是不是就没有作用了呢？
-streaming是不随机的。
-
-### Q100: 请问grpo使用vllm进行推理，vllm可以设置trust_rwmote_code吗？
-默认就是true的。
-
-### Q101: 请教一下，pretrain阶段数据集比较大，用了streaming流式和packing打包数据，这时候需要设置 max_steps，有没有参数或者命令可以根据epochs、bs等参数计算打包后的总的steps吗？
-设置`--max_steps`或`--max_epochs`，详见[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id4)streaming参数说明。
-
-### Q102: unsloth训练，报错：assert(type(target modules) in (list,tuple,))。配置的参数是--target modules all-linear
-别用`all-linear`，改为具体的模块列表，比如`--target_modules q k v`。
-
-### Q103: Swift现在支持多标签分类么？
-支持的。自定义数据集文档有格式，然后在命令行参数文档中搜索一下`problem_type`，改一下，其他和回归是一样的。
-
-### Q104: 请问packing中flash_attn是分开处理的还是合并处理的？
-一定需要flash_attn，不然是有误差，attention_mask会出问题。
-
-### Q105: 请问对于qwen2.5-omni来说--freeze_vit false意味这视觉编码器和音频编码器都打开了，有什么办法可以只打开音频编码器不打开视觉编码器吗？
-`--target_regex`写一下。
-
-### Q106: 请问现在swift的强化学习那几种训练方法支持序列并行么？
-支持pt, sft, dpo and grpo。
-
-### Q107: 使用 lora sft之后是不会储存tokenizer.json吗
-lora不会存储，merge后才会把这些文件迁移过来，因为lora目录需要配合原模型使用。
-
-### Q108: GRPO 的reward_model 和 reward_funcs可以一起用吗？
-可以。
-
-### Q109: 想请教一下，在进行GRPO时不打算引入KL项，有相关的参数可以调整吗？
-命令行参数搜一下beta。
-
-### Q110: 请教一个问题，做grpo的时候，如何在orm的自定义奖励函数中获取原始标签呢？我打印了kwargs的messages字段，里面的每一项的assistant的content的值已经被替换成生成的结果了
-放到另外的列里。
-
-### Q111: 默认只用 num_iterations=1 的话，clip 就失去作用了吧？dapo 的 clip higher 也没用。我看 veRL 有个 micro batch 可以设置单轮小批次更新 policy model 来使得 clip 项生效，ms-swift 的 mini batch 看源码貌似只是做了梯度累加？
-是的，需要num_iterations>1。
-
-### Q112: 请问qwen2.5-omni的训练支持全参训练吗，是否支持talker的训练？
-目前不支持talker训练，只有thinker。
-
-### Q113: 请问，sequence parallel是否可以和liger kernel同时启用呀？
-可以。
-
-### Q114: 请问ppo训练rm和policy有什么要求呢？
-现在ppo还只支持rm和policy是同一系列的模型(tokenizer/template)。
-
-### Q115: 还想问一下，由于llama3.1没有小于8B的模型，因此我想用3.2 1B的的来微调，那么还能用Llama-3.1这个奖励模型吗？
-要求是`template`和`tokenizer`要一样， 3.1 和 3.2 应该问题不大。
-
-### Q116: 请问swift是否能缓存一份mappiing之后的数据？方便排查训练数据的问题
-设置`--load_from_cache_file false`。
-
-### Q117: 全参数训练为啥会有warning: none of the inputs have requires_grad=True?
-如果vit没有训练，那有这个warning是正常的，如果训练了，则不应该抛出。
-
-### Q118: 现在qwen2.5vl ulysses支持sdpa吗？
-vl模型的目前仅支持flash-attn，纯文本两种都支持。
-
-### Q119: 请问这图片列表形式的videos现在支持了吗？格式如下
-```json
-{"messages": [{"role": "assistant", "content": "<video>是一只狮子在跑步"}], "videos": [["1.jpg","2.jpg"]]}
-```
-支持了，使用文件目录的方式。
-
-### Q120: 请教一个问题，grpo脚本中的save_steps指的是step还是global step？目前本地训练显示的global step是18， wandb上显示的step是628。
-`global_step`，本地tqdm显示的。
-
-### Q121: use_logits_to_keep 现在多模态大模型上可以用吗？
-如果多模态token的展开在模型的forward内会报错。
-
-### Q122: 请问一下为什么训练到会有好几次显存大幅度增加，已经50step或者100step
-设置环境变量`PYTORCH_CUDA_ALLOC_CONF`，具体查看torch文档。
-
-### Q123: 请问packing_cache这个参数设置，多机训练，我设置了文件夹地址后还是会报错，这有啥特殊要求吗?
-需要设置为共享的磁盘路径。
-
-### Q124: Qwen3非thinking模式和thinking模式，数据集和参数设置有什么不同吗？
+### Q21: thinking模型训练
 查看这个[issue](https://github.com/modelscope/ms-swift/issues/4030)。
 
-### Q125: 请问megatron-swift如何配置断点续训？
-配置`--load`加载checkpoint，另外根据需要配置这几个参数，`--finetune`，`--no_load_optim`，`--no_load_rng`。如果是lora断点续训，配置`--adapter_load`，其他同全参数训练，详见[megatron-swift命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Megatron-SWIFT/Command-line-parameters.html)。
+### Q22: SWIFT支持蒸馏吗？
+参考这个[例子](https://github.com/modelscope/ms-swift/blob/main/examples/sampler/distill/distill.sh)。
 
-### Q126: 有没有人在复现Kimi-VL-A3B-Instruct的时候出现了如下的报错？
-```text
-[rank7]:    File "/root/.cache/huggingface/modules/transformers_modules/Kimi-VL-A3B-Instruet/modeling_kimi_v1.py", line 946, in forward
-[rank7]:      assert not self.training
-[rank7]:
-[rank7]:    AssertionError
+### Q23: GKD训练相关问题
+- GKD训练支持student model和teacher model的model_type不一致，只需要词表一样即可（带MoE会比较慢）。
+- SWIFT v4版本以后支持teacher model和student model实行不同的并行配置。详情请见[例子](https://github.com/modelscope/ms-swift/tree/main/examples/ray/gkd)。
+
+### Q24: GRPO训练相关问题
+- SWIFT现在支持多模态的GRPO训练。GRPO训练过程中loss接近0是正常情况，参考[issue](https://github.com/huggingface/open-r1/issues/239#issuecomment-2646297851)。
+- GRPO训练时不想引入KL项，可以通过设置KL正则系数`--beta=0`不加载ref model。
+- LoRA微调后继续做GRPO训练，使用`--adapters sft_ckpt --ref_adapters sft_ckpt`。
+- 由于算entropy会有额外的一点开销，所以默认没有记录曲线。如果需要，请设置`--log_entropy True`，
+- colocate模式不支持`--vllm_use_async_engine`。
+- GRPO不支持channel_loss。
+- GRPO无法同时使用Liger kernel和padding free。同时使用需要修改liger kernel库中的liger grpo loss。
+- GRPO/PPO代码实现中mini_batch仅用于梯度累积。激活Clip机制需要num_iterations>1。设置num_iterations=1时会导致失效。
+- 如果训练集有不同的task，请查看[多任务训练文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/GRPO/DeveloperGuide/multi_task.html)。
+- 更多GRPO相关的FAQ，请查看[GRPO FAQ](https://swift.readthedocs.io/zh-cn/latest/Instruction/GRPO/GetStarted/GRPO.html#faq)
+
+### Q25: Reward函数（模型）相关问题
+- `--reward_model`和`--reward_funcs`可以一起使用，最终会通过加权求和得到一个总reward。加权权重可以通过`--reward_weights`指定，权重顺序为reward_func1、reward_func2、..、reward_funcn、reward_model。
+- 自定义reward函数参考[examples/train/grpo/plugin/plugin.py](https://github.com/modelscope/ms-swift/blob/main/examples/train/grpo/plugin/plugin.py)。
+- 针对math问题，数据集里需要存在solution字段，不然影响accuracy的计算。
+- 如果在ORM的自定义reward函数中需要传入数据集中的某个字段，请将该字段放到与messages同级的位置，之后可以从reward_kwargs中拿到该字段。
+- 在GRPO训练的过程中如果需要指定一个llm-judge模型来做打分，请参考[奖励模型的文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/GRPO/DeveloperGuide/reward_model.html)来实现。
+
+### Q26: Rollout相关问题
+- Rollout不兼容Pipeline Parallel，如果需要多卡推理加速，可以使用Tensor Parallel。
+- vLLM推理引擎默认`trust_remote_code`为true。
+
+### Q27: 训练脚本中的save_steps指的是step还是global step？
+指的是global_step，也就是本地tqdm显示的。
+
+### Q28: GSPO训练传入了`--importance_sampling_level sequence`后，还支持传入参数`--top_entropy_quantile`吗？即还能实现对熵分布前x%的token的优化吗？
+支持，顺序是先正常计算Sequence loss（受importance_sampling_level影响），再根据top_entropy_quantile mask loss。
+
+### Q29: ppo等偏好训练相关问题
+- PPO训练不支持`--max_grad_norm`参数，如果出现梯度爆炸，需要从学习率、reward scale等其他方面调参。
+- 目前PPO还只支持RM和policy是同一系列的模型(tokenizer/template)，不然会导致prompt格式不一致、token序列切分不一致等问题影响效果。
+- 目前不支持多轮的DPO，可以用 GRPO + multi-turn（多轮推理 + reward 函数打分）作为替代。
+
+### Q30: MoE模型训练相关问题
+LoRA训练中，路由器模块是否参与训练取决于gate/router是否是nn.Linear实现。如果是nn.Parameter实现不会参与LoRA训练，这种情况会导致aux-loss基本没变化，在此前提下如果希望训练路由器，需要将all-router也加到`--target_modules`。
+```shell
+--target_modules all-linear all-router
 ```
-需要将`config.json`中的`topk_method`改成`greedy`。
+all-router不是通配符匹配模块名，而是一个特殊关键字，告诉框架"把路由器也纳入可训练范围"。<br>
+还可以通过`--target_parameters`来指定LoRA替换具体参数，详见命令行参数[target_parameters](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#tuner)。
 
-### Q127: 想问下训练qwenvl2.5的时候，怎么保证设定max_pixels后检测框的坐标是对的？这部分swift是怎么处理的？
-会保存预处理前和后的，然后对bbox进行调整，不过推理没有这样的调整，需要提前手动处理图片。
+### Q31: Megatron-SWIFT训练相关问题
+- Checkpoint保存，搜索命令行参数[--save_strategy](https://swift.readthedocs.io/zh-cn/latest/Megatron-SWIFT/Command-line-parameters.html)。
+- Megatron多机训练pipeline parallel时只有last rank持有完整输出，所以日志在last rank打印，而不是从master node打印。
+- Megatron-SWIFT支持`--save_total_limit`；支持SwanLab监控训练，详见[Megatron-SWIFT命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Megatron-SWIFT/Command-line-parameters.html)
+- ViT用的是transformers的模型结构，目前不走Megatron并行。训练遇到OOM时可以通过`--decoder_first_pipeline_num_layers`参数来降低LLM decoder层数，留更多显存给ViT来缓解。
+- Megatron-SWIFT支持新增模型，但是目前没有教程，请查看新增模型的PR了解配置方式。
+- Megatron-SWIFT的sequence parallel不是独立设置的，并行度等于tensor parallel的度数，即通过`--tensor_parallel_size`设置。
+- 支持Block-wise FP8，参考[examples/megatron/fp8例子](https://github.com/modelscope/ms-swift/tree/main/examples/megatron/fp8)。
+- 断点续训需要配置如下参数。
+```shell
+--mcore_model <path/to/checkpoint-xxx>   # 加载模型权重
+--finetune false                         # 标记为微调模式（而非继续训练）
+--no_load_optim                          # 不加载 optimizer 状态（可选）
+--no_load_rng                            # 不恢复随机数状态（可选）
+```
+如果是LoRA断点续训，需要额外设置`--mcore_adapter`，其他同全参数训练，详见[Megatron-SWIFT命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Megatron-SWIFT/Command-line-parameters.html)。
+- Megatron-SWIFT不支持QLoRA训练。
 
-### Q128: 问一个问题，我想在dataset中返回solution 字段，所以我写了preprocess，但是dataset只返回messages和images，没返回solution这该如何修改呢？
-设置`--remove_unused_columns false`。
+### Q32: mtp相关问题
+- 需要MTP训练，请手动设置命令行参数`--mtp_num_layers`，可以参考config.json中的`num_nextn_predict_layers`，`mtp_num_hidden_layers`字段填写该值。
+- 如果base模型不附带MTP结构，可以从头初始化训练MTP。
+- 多模态的MTP目前还没支持。
 
-### Q129: 请问下，lora参数合并报错，目前peft是0.11.0，这个是因为peft版本需要升级吗
-```text
+### Q33: 量化模型训练相关问题
+- QLoRA微调参考[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/qlora)。
+- GPTQ等int类型的量化方式导致参数无法参与求导，所以无法进行全参数微调，只能附着LoRA等额外结构参与更新。
+- QLoRA训练后的模型merge参考[QLoRA例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/qlora)。
+- Megatron-SWIFT不支持QLoRA训练。
+
+### Q34: 一些特殊模型的训练
+- SWIFT目前不支持MiniCPM-O使用音频模态输入的训练。
+- 微调DeepSeek-VL-2需要`transformers<4.42`，`peft==0.11.*`。
+- Moonlight-16B-A3B-Instruct微调，因为模型文件中禁止了训练, 参考DeepSeek-VL-2的[解决方案](https://github.com/modelscope/ms-swift/issues/543)绕过。
+- Ovis2这个模型有点特殊，微调时需要padding到max_length，所以要显式设置`--max_length`。
+- Qwen2.5-Omni目前不支持talker训练，只有thinker。
+- Qwen2-Audio的sft不支持packing。
+
+### Q35: 在不支持flash attention的设备上attention implemation默认是什么？
+默认使用sdpa。
+
+### Q36: 模型的默认训练都是left padding吗?
+训练可以选择使用left padding还是right padding。默认是right padding, batch infer都是left padding。
+
+### Q37: SWIFT能够支持设置最小的learning rate吗，感觉最后减到太小了
+可以设置，通过
+```shell
+--lr_scheduler_type cosine_with_min_lr
+--lr_scheduler_kwargs '{"min_lr": 1e-6}'
+```
+
+### Q38: 是否支持用yaml文件配置grpo和sft？
+支持，该配置会在main.py中被处理成命令行。
+
+### Q39: 是否支持`--use_liger_kernel`和`--log_entropy`一起用？
+不支持，liger没有实例化logits，无法获取entropies。
+
+### Q40: 遇到gradient_accumulation_fusion相关报错，安装了apex也不无法解决
+```shell
+RuntimeError: ColumnParallelLinear was called with gradient_accumulation_fusion set to True but the custom CUDA extension fused_weight_gradient_mlp_cuda module is not found. To use gradient_accumulation_fusion you must install APEX with --cpp_ext and --cuda_ext. For example: pip install --global-option="--cpp_ext" --global-option="--cuda_ext ." Note that the extension requires CUDA>=11. Otherwise, you must turn off gradient accumulation fusion.
+```
+通过`--gradient_accumulation_fusion false`关闭梯度累积融合。
+
+### Q41: 几个任务一起finetune vlm，不同任务视频采样规则不一致，如何配置？
+在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)中搜索`--interleave_prob`。
+
+### Q42: 多模态packing预训练每次pytorch allocator cache flushes since last step后，显存使用好像就会增长一点，步数多了容易oom
+添加环境变量`PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'`，减少内存碎片化。
+
+### Q43: `--use_logits_to_keep`在多模态大模型上可以用吗？
+如果多模态的token展开发生在模型外部，则可用；如果发生在模型forward内部，就报错。
+
+### Q44: 从qwen base模型微调成chat模型有没有实践文档，有什么要特别配置的吗?
+使用`swift sft`即可，没有其他需要特别配置的，参考[例子](https://github.com/modelscope/ms-swift/tree/main/examples/train/base_to_chat)。
+
+### Q45: 模型训练后，回复重复了很多内容怎么办？
+请参考[预训练与微调](https://swift.readthedocs.io/zh-cn/latest/Instruction/Pre-training-and-Fine-tuning.html)。如果训练过程中出现重复的情况，可以考虑多训练几个epoch, 清洗数据, 全参数训练或者采用RLHF的方式来缓解。
+
+### Q46: 全参数训练的时候由于卡不能使用bf16，所以设置`--torch_dtype float16`，出现以下报错
+```shell
+lib/python3.12/site-packages/torch/amp/grad_scaler.py", line 260, in _unscale_grads_ raise ValueError("Attempting to unscale FP16 gradients.") ValueError: Attempting to unscale FP16 gradients.
+```
+fp16 的数值范围很小（最大 65504），全参数训练的梯度容易溢出。可以使用`--torch_dtype fp32`尝试一下。
+
+### Q47: lora参数合并出现以下报错，目前peft是0.11.0，这个是因为peft版本需要升级吗？
+```shell
 File "/opt/conda/lib/python3.9/site-packages/peft/config.py", line 118, in from_peft_type
   return config_cls(**kwargs)
 TypeError: __init__() got an unexpected keyword argument 'corda_config'
 ```
-训练和合并的peft版本不一致导致的。
+训练端和合并端的peft版本不一致导致的，合并端需要升级peft到和训练端一致（或更高）的版本。
 
-### Q130: 请问现在支持多轮的DPO吗？
-不支持。
+### Q48: safetensors_rust.SafetensorError: Error while deserializing header: HeaderTooLarge
+磁盘空间不足了，模型没有保存完整，权重数据被截断。
 
-### Q131: 想问下，我之前运行过一次注册数据集了，后面修改了action_preprocessor的代码，但是数据还是和原来的一样，像是忽略了我的修改？
-设置一下`--load_from_cache_file false`。
+### Q49: AttributeError: module 'numpy' has no attribute 'object'
+`numpy==1.26.3`，尝试一下。
 
-### Q132: 请问sequence_parallel_size和自定义loss冲突吗？我在自定义loss里面打印了一些debug信息，但是发现开启了sequence_parallel_size 过后就没有信息被打印出来了，也没有报错，sft训练是正常的，担心是自动调了什么别的库。
-冲突的，sequence parallel在自己的代码中定制了loss，可以自己改下[这里](https://github.com/modelscope/ms-swift/blob/main/swift/trainers/sequence_parallel/ulysses.py)。
+### Q50: unsloth训练，报错：assert(type(target modules) in (list,tuple,))。配置的参数是`--target modules all-linear`
+将`all-linear`改为具体的模块列表，比如`--target_modules q k v`，unsloth的LoRA实现路径不会展开具体模块名。
 
-### Q133: swift pt这种训练方式，如果传入了`<image>`，`<image>`是不是没有被屏蔽，每个token也参与损失计算？
-不算损失的，可以在命令行日志中找一下打印的labels看看。
+### Q51: 对于qwen2.5-omni来说--freeze_vit false意味这视觉编码器和音频编码器都打开了，有什么办法可以只打开音频编码器不打开视觉编码器吗？
+用`--target_regex`正则匹配只想要训练的模块路径。例如：
+```shell
+--target_regex ".*audio.*"   # 只匹配包含 audio 的模块
+```
 
-### Q134: 想问一个问题，多模态packing预训练每次pytorch allocator cache flushes since last step后，显存使用好像就会增长一点，步数多了容易oom
-加个环境变量`PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'`。
+### Q52: Qwen3.5支持cp吗？
+支持，具体相关可以查看[Qwen3.5最佳实践](https://swift.readthedocs.io/zh-cn/latest/BestPractices/Qwen3_8-Best-Practice.html)。
 
-### Q135: 如何在训练时使用focal loss？当前支持的loss种类哪里有？
-可以在这里添加新的[loss](https://github.com/modelscope/ms-swift/blob/main/swift/plugin/loss.py)。
+### Q53: gkd能否像opsd一样支持teacher和student使用不一样的系统提示词？
+支持。
 
-### Q136: rollout设置了pipeline parallel size，貌似trl和vllm里获取不到word size这个值。
-rollout应该是不兼容pipeline parallel。
+### Q54: MoE模型可以使用deepspeed zero3训练吗？
+可以，但是会较慢。
 
-### Q137: 请问qwen2audio的sft支持packing吗？
-不支持。
+### Q55: megatron swift支持显卡B300吗？
+支持。
 
-### Q138: 请问gspo训练支持传入参数top_entropy_quantile吗？传入了--importance_sampling_level sequence后，还能实现对熵分布前x%的token的优化吗？
-支持，顺序是先正常计算loss（受importance_sampling_level影响），再根据top_entropy_quantile mask掉loss。
+### Q56: megatron stf和swift stf跑MoE模型结果不太相同怎么办？
+MoE模型尽量使用megatron跑，megatron+MoE相对成熟，transformers的MoE训练是5.0版本之后才开始支持，不一定稳定。
 
-### Q139: gkd训练student model和teacher model的model_type需要一致吗，一个dense一个moe可以吗?
-可以的，只需要词表一样，不过带moe就会比较慢。
+### Q57: 什么情况下训练要开启think模式？
+如果你的训练数据涉及CoT，建议开启think模式。
 
-### Q140: 请问在不支持flash attention的设备上attention implemation默认是什么呢？文档中默认是none
-默认使用sdpa。
+### Q58: 带 `<think></think> `的数据在训练时都需要开启think模式吗？
+这个需要看具体训练场景，如果数据的逻辑推理不是特别多，可以使用no-think。
 
-### Q141: freeze_parameters_ratio参数是从注意力层开始算的吗？
-从embedding开始算，可以结合trainable_parameters设置。
+### Q59: 训练qwenvl-2.5时出现报错
+```shell
+[rankØ]: Original Traceback (most recent call last):
+[rank0]:
+File "/apdcephfs_qy3/share_300998916/weituchong/miniforge3/envs/qwen/lib/python3.10/site-packages/torch/utils/data/_utils/worker.py", line 349, in _worker_loop
+[rank0] :
+data = fetcher. fetch index)
+type: ignore [possibly-undefined]
+[rank0]:
+File"/apdcephfs_qy3/share_300998916/weituchong/miniforge3/envs/qwen/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 52, in fetch
+[rankø]:
+data = [self-dataset [idx] for idx in possibly_batched_index]
+[rankø]:
+File"/apdcephfs_qy3/share_300998916/weituchong/miniforge3/envs/qwen/Lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 52, in
+[rankø] :
+data = [self dataset [idx] for idx in possibly_batched_index]
+[rank0]:
+File "/apdcephfs_qy3/share_300998916/weituchong/miniforge3/envs/qwen/lib/python3.10/site-packages/swift/llm/dataset/utils-py", line 191, in _getitem
+[rank0]:
+raise ValueError( 'Failed to retrieve the dataset. You can avoid this issue by increasing
+'max_length'
+or "
+[rankø]: ValueError: Failed to retrieve the dataset. You can avoid this issue by increasing 'max_length' or modifying the 'truncation_strategy -
+```
+如果上面无其他报错信息，则是数据集超长，把`--max_length`提高，只要不OOM就没问题。
 
-### Q142: 请问，lora微调后，不支持在adapter上继续做dpo或者grpo训练吗？
-支持了, 命令行参数文档中搜索`--adapters`。
+### Q60: 训练多模态模型时，如何做图像样本的动态数据增强，即在每个batch输入模型前都会对数据增强一次？
+Swift目前没有开箱即用的动态数据增强支持，可以根据需要自行扩展源码。
 
-### Q143: 多模态数据集希望在加载数据之后做动态数据增强，例如，给输入数据随机添加噪声。请问要自定义动态数据增强，需要继承或重写哪些部分呢？
-在template中修改encode方法。
+### Q61: grpo训练一般需要多少样本数据？
+几千就会有效果，多一些效果更好。
 
-### Q144: ppo训练支持梯度裁剪吗？
-不支持。
+### Q62: Swift可以做视觉模型的预训练吗？
+可以，需要自己调节学习率，详见[教程文档](https://swift.readthedocs.io/zh-cn/latest/BestPractices/Rapidly-Training-VL-model.html)。
 
-### Q145: 请问liger kernel和padding free没法在grpo阶段一起开吗？
-是的。如果一起开，需要改liger grpo loss的实现，在liger kernel库中，不方便改。
+### Q63: magetron支持像Swift一样通过`--loss_type my_loss`使用自定义函数吗？
+megatron 目前需要改动 trainer 里的 loss_func, 未来会支持更简单的自定义逻辑。
 
-### Q146: 请问，swift sft的命令行参数里面，使用lora训练和--trainable_parameters参数是兼容的吗？就是用lora训练language model，然后同时在最后一层加个score head一起训练。
-不兼容，用modules_to_save。
+### Q64: Swift框架支持Agentic RL训练吗？
+支持，具体参考[多轮训练](https://swift.readthedocs.io/zh-cn/latest/Instruction/GRPO/DeveloperGuide/multi_turn.html)。
 
-### Q147: 多机多卡训练，只有主节点有日志，是正常的吗？
-正常的。
+### Q65: 如何在ROCm/MI300X上使用megatron-swift训练Qwen3-Omni？
+可以参考这个[最佳实践](https://swift.readthedocs.io/zh-cn/latest/BestPractices/AMD-support.html)。
 
 ## 推理
 
-### Q1:swift推理有文档吗？
-swift支持python脚本、命令行、ui界面推理，详见[推理和部署](https://swift.readthedocs.io/zh-cn/latest/Instruction/Inference-and-deployment.html)。
+SWIFT支持python脚本、命令行、ui界面推理，详见[推理和部署](https://swift.readthedocs.io/zh-cn/latest/Instruction/Inference-and-deployment.html)。
 
-### Q2: 训练后的模型如何使用数据集推理？
-参数`--load_data_args true`或`--val_dataset <your-val-dataset>`，见文档[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
+### Q1:SWIFT推理如何设置模型？
+- 全参数训练的模型、LoRA训练后合并的模型或者从model hub下载的模型，设置命令行参数`--model <model/id/or/path>`。
+- LoRA训练后未合并的模型，`--modelmodel/id/or/path>`指定基模路径的同时设置`--adapters <path/to/adapter>`。
 
-### Q3: swift推理的时候可以指定下载好的模型吗？
-`--model`配置本地路径即可，详见[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
+### Q2: SWIFT如何使用数据集进行推理？推理结果保存在哪儿？
+- 通过`--val_dataset <path/to/val_dataset>`指定数据集。如果想对训练中切分的验证集进行推理可以设置参数`--load_data_args true`。
+- 推理结果保存路径通过`--result_path <your/path>`设置，日志中会打印路径。详见文档[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
+- 如果需要保留推理数据集中非messages字段的额外字段，请设置`--remove_unused_columns false`。
 
-### Q4: 我想在一个没有label的数据集上推理，怎么做呢？我看文档里面的数据集格式都是训练集
-配置参数`--val_dataset <your-val-dataset>`。
+### Q3: SWIFT如何设置批量推理？
+如果infer_backend为transformers，通过设置命令行参数`--max_batch_size 16`，但需要注意该参数设置的是每张卡上的batch_size，不是全局的。或参考[demo](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo.py)。
 
-### Q5: 遇到报错ValueError: Input length of input_ids is 35, but `max_length` is set to 20.如何解决？
-```text
-raise ValueError(
-ValueError: Input length of input_ids is 35, but `max_length` is set to 20. This can lead to unexpected behavior. You should consider increasing `max_length` or, better yet, setting `max_new_tokens`.
-```
-设置`model.generation_config.max_new_tokens`。
+### Q4: SWIFT如何设置流式推理？
+使用`--stream true`，此时推理结果将逐条写入jsonl文件。<br>
+注意：
+- 流式推理不支持ddp。
 
-### Q6: qwen2-vl推理（训练）爆显存
-设置命令行参数`--max_pixels xxx`、环境变量`MAX_PIXELS=xxx`、或特定模型参数`--model_kwargs '{"max_pixels": xxx}'`，其中环境变量仅对文档中对应的模型生效，详见文档[特定模型参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id18)。
+### Q5: vLLM和SGLang推理后端相关的问题
+- 对于LoRA训练的模型是否需要合并，请查看vLLM和SGLang文档，如果支持LoRA推理则不需要在推理前合并。
+- SGLang推理目前不支持多模态。
 
-### Q7: v100显卡，在python虚拟环境中，参考https://swift2x.readthedocs.io/zh-cn/latest/Multi-Modal/qwen2-vl%E6%9C%80%E4%BD%B3%E5%AE%9E%E8%B7%B5.html 完成环境准备，在测试推理命令：CUDA_VISIBLE_DEVICES=0,1,2,3 swift infer --model_type qwen2-vl-7b-instruct 时报错：RuntimeError: probability tensor contains either `inf`, `nan` or element < 0
-尝试用A10或者3090机器推理。
+### Q6: 生成参数相关的问题
+temperature等参数默认从generation_config.json中读取。也可以通过`--temperature 0`或者`--top_k 1`显式设置来取消推理随机性。
 
-### Q8: 运行下面命令，预测之后的结果在哪里？CUDA_VISIBLE_DEVICES=0 swift infer --ckpt_dir output/glm4v-9b-chat/vx-xxx/checkpoint-xxx-merged --load_data_args true
-日志中会打印路径。
+### Q7: 如何将system_prompt置空？命令行不设置system参数，但是它会加上默认的system。
+显性设置`--system ''`。
 
-### Q9: 现在最新的swift版本，infer命令能通过logprobs参数输出概率值吗？
-可以输出logprobs，命令行推理设置`--logprobs true`，python脚本推理设置`request_config = RequestConfig(..., logprobs=True, top_logprobs=2)`，参考[test_logprobs.py](https://github.com/modelscope/ms-swift/blob/main/tests/infer/test_logprobs.py)。
+### Q8: 推理时如何计算acc/rouge等指标？
+使用`--metric`，具体详情在[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id14)中搜索该参数。
 
-### Q10: vllm会报错，assert factor in rope_scaling
-详见qwen2-vl [issue#96](https://github.com/QwenLM/Qwen2.5-VL/issues/96)。
+### Q9: 模型推理的时候如果需要在特定前缀下继续推理的话是设置哪个参数？
+使用参数`--response_prefix`。
 
-### Q11: vllm作为推理后端的话，模型必须合并以后才能调用吗？
-可以不合并，详见文档[命令行参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html)。
-
-### Q12: 请问在使用python脚本推理时，如何使用cpu?
-设置环境变量，`os.environ['CUDA_VISIBLE_DEVICES'] = '-1'`。
-
-### Q13: 有人遇到过这个问题吗?RuntimeError: "triu_tril_cuda_template" not implemented for'BFloat16'
-升级torch,这个版本的torch没实现这个算子。
-
-### Q14: qwen2-audio支持流式推理吗？
-支持，详见[issue](https://github.com/modelscope/ms-swift/issues/1653)
-
-### Q15: inference client推理多模态，do_sample在哪里设置？
-设置`temperature=0`。
-
-### Q16: ms-swift支持大模型批处理不？
-支持的。详见[demo](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo.py)。
-
-### Q17: ms-swift量化模型的时候，显示内存不足，可以在量化的时候少占用一些资源吗，慢一点没关系。
-尝试设置`--device_map cpu`。
-
-### Q18: swift支持对多模态模型量化吗？
-支持。
-
-### Q19: 使用GPTQ报错如下，请问是啥原因？
-```text
-if llm_config['architectures'][0] == 'LlamaForCausalLM':
-KeyError: 'architectures'
-```
-尝试transformers==4.44.*版本。
-
-### Q20: swift infer如何将评估的结果保存到指定文件呢 每次都不知道保存到哪里了
-设置`--result_path your_path`，详见[InferArguments](https://github.com/modelscope/ms-swift/blob/main/swift/llm/argument/infer_args.py)。
-
-### Q21: AWQ量化yi-vl-6b出错如下：
-```text
-TypeError: swift.llm.utils.model.get_model_tokenizer_with_flash_attn() got multiple values for keyword argument 'automodel_class'.
-```
-请使用gptq量化。
-
-### Q22: 想问一下用swift export对qwen2.5 72B模型进行gptq int4量化，max model length=32768用的是默认值，给的校准数据集有128个样本，但是量化的时候报错了，报错日志是：factorization could not be completed because the input is not positive-definite(the leading minor of order 18145 is not pisitive-definite)。是什么原因？
-海森矩阵不正定的问题，试试其他的数据集。
-
-### Q23: 请问批量推理是只能自己编写代码运行吗？不可以按照 sft 那样填脚本参数码
-可以，`swift infer --val_dataset xxx --max_batch_size 16 ... `
-
-### Q24: 问一下，swift app推理时，temperature默认是多少的？
-默认从generation_config.json中读取。
-
-### Q25: 请问，导出和量化的时候可以多卡吗？
-加载模型可以多卡，量化是单卡。
-
-### Q26: swift export的时候传入自定义的template_type,是不是就可以永久改掉template_type了？如果swift export --template_type 自定义,是不是就可以把模型对应的template改掉
-不会被修改,swift中的template是定义在swift内部的,不是以jinja方式保存的。
-
-### Q27: awq量化Qwen2VL报错：TypeError: Qwen2VLForConditionalGeneration.__init__() got an unexpected keyword argument 'use_cache'
-用`gptq`量化。
-
-### Q28: ddp 推理，infer里面的这个max_batch_size，是指每张卡的batch_size还是总的batch_size
-每张卡。
-
-### Q29: 请问swift.inference现在支持messages格式的输入吗？现在看到好像只能用query格式，得到response。数据answer里面已经包含了部分prompt，希望补全answer，应该怎么修改inference
+### Q10: 数据answer里面已经包含了部分prompt，希望补全answer，应该怎么修改inference？
 ```text
 {"messages": [{"role": "system", "content": "<system>"}, {"role": "user", "content": "<query1>"}, {"role": "assistant", "content": "answer1, "}]}
 ```
-用swift3是可以的，参考[examples/infer/demo_agent](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo_agent.py)。
+参考[examples/infer/demo_agent](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo_agent.py)。
 
-### Q30: 请问swift infer的时候，如何让结果实时写入result_path，而不是最后一次性写入呢？
+### Q11: 多模态模型推理时如何限制最大像素，以减少显存占用？
+设置命令行参数`--max_pixels xxx`、环境变量`MAX_PIXELS=xxx`、或特定模型参数`--model_kwargs '{"max_pixels": xxx}'`。其中环境变量仅对文档中对应的模型生效，详见文档[特定模型参数](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id19)。
+
+### Q12: SWIFT推理如何输出概率值logprobs参数？
+命令行推理设置`--logprobs true`，python脚本推理设置
 ```shell
-swift infer \
---ckpt_dir model_dir \
---streaming true \
---val_dataset dataset.jsonl \
---result_path result.jsonl
+request_config = RequestConfig(..., logprobs=True, top_logprobs=2)
 ```
-`--stream true`，这样可以一条条写，不过是非batch推理的。
+具体可以参考[test_logprobs.py](https://github.com/modelscope/ms-swift/blob/main/tests/infer/test_logprobs.py)。
 
-### Q31: 我在swift训练推理的时候是有效果的，但是用merge_lora后再通过ollama的api开接口的时候效果就没了
-试试transformers加载，swift的template是对齐transformers的。
+### Q13: SWIFT推理如何输出last_hidden_state？
+没有参数可以直接使用，可以在[这里](https://github.com/modelscope/ms-swift/blob/main/swift/rlhf_trainers/grpo_trainer.py)参考GRPO trainer的`_get_last_hidden_state`方法。
 
-### Q32: 模型推理的时候如果需要在特定前缀下继续推理的话是设置哪个参数？
-参数`--response_prefix`。
+### Q14: transformers，vllm，ollama等推理结果不一致问题
+SWIFT的template是对齐transformers的。检查推理参数是否对其。此外，VllmEngine和TransformersEngine是有差异的。
 
-### Q33: 一直报这个错怎么改呀？
-```text
-File "/mnt/workspace/swift/swift/1lm/dataset/preprocessor/core. py", line 69, in _check_messages raise
-ValueError(f'assistant_message; {assistant_message}')
-ValueError: assistant_message: {'role' :'assistant', 'content': ''}
-```
+### Q15: embedding/reranker模型推理
+- embedding模型推理参考这里的[例子](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo_embedding.py)。
+- reranker模型推理参考这里的[例子](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo_reranker.py)。
+
+### Q16: 使用python脚本推理时，如何使用cpu?
+设置环境变量，`os.environ['CUDA_VISIBLE_DEVICES'] = '-1'`。
+
+### Q17: 使用swift infer命令进行推理，支持多机推理吗？
+如果单节点放得下模型，外面封装k8s就行。如果单节点放不下就不支持。
+
+### Q18: swift sample的时候，是否支持batch？
+这个[脚本](https://github.com/modelscope/ms-swift/blob/main/examples/train/rft/rft.py)，可以用多进程对数据集拆分采样。
+
+### Q19: 特殊模型依赖版本相关问题
+- Qwen2-Audio推理结果出现混乱，请使用transformers4.48。
+- transformers4.55.2训练的LoRA不能使用小于4.52的版本加载，详见[issue#5440](https://github.com/modelscope/ms-swift/issues/5440)。
+- swift对不同版本的qwen-vl-utils做了兼容，使用qwen2.5-vl和qwen3-vl模型时不需要切换该依赖版本。
+
+### Q20: safetensors_rust.SafetensorError: Error while deserializing header:MetadataIncompleteBuffer
+模型权重损坏。
+
+### Q21: vLLM 报错如下：
 ```shell
-CUDA_VISIBLE_DEVICES=0 NPROC_PER_NODE=1 MAX_PIXELS=1003520 swift sft --model Qwen/Qwen2.5-VL-7B-Instruct --train_type lora --dataset /mnt/workspace/data.json --deepspeed zero2 --max_length 16384
+ValueError: the decoder prompt contains a(n) video item with length 16758, which exceeds the pre-allocated encoder cache size 16384. please reduce the input size or increase the encoder cache size by setting --limit-mm-per-prompt at startup.
 ```
-数据集assistant字段为空，如果是推理，把这个空字符串删掉，因为这个会导致训练时nan，会做检查。
-
-### Q34: 推理报错，ImportError: cannot import name 'shard_checkpoint' from 'transformers.modeling_utils' (/usr/local/lib/python3.10/dist-packages/transformers/modeling_utilspy）
-尝试卸载autoawq。
-
-### Q35: swift sample的时候，好像不支持batch？好像是for循环一个个例子sample，有点慢
-有一个[脚本](https://github.com/modelscope/ms-swift/blob/main/examples/train/rft/rft.py)，可以用多进程对数据集拆分采样。
-
-### Q36: 请问swift支持embedding模型的推理吗？出现如下报错了
-```text
-[rank0]:[W511 17:18:01.815062493ProcessGroupNCCL.cpp:1250]Warning: WARNING: process group has NOT been destroyed before we destruct Proc essGroupNCCL. On normal program exit, the application should call des troy_process_group to ensure that any pendingNCCL operations have fi nished in this process. In rare cases this process can exit before th is point and block the progress of another member of the process grou p. This constraint has always been present, but this warning has onl y been added since PyTorch 2.4 (function operator( ))
-```
-embedding模型推理请使用官方模型代码，swift还没支持。
-
-### Q37: swift框架推理支持模型或者张量并行么？训练不会oom，推理时候报oom了
+这通常是多模态输入过长，超过了vLLM预分配的encoder cache size导致的。可以通过 `--limit_mm_per_prompt` 调整encoder cache size；另一个可行的解决方法是通过在Swift cli中传入：
 ```shell
-CUDA_VISIBLE_DEVICES=0,1 \
-MAX_PIXELS=1003520 \
-swift infer \
-    --adapters /path/to/checkpoint-xxx \
-    --merge_lora true \
-    --infer_backend vllm \
-    --load_data_args true \
-    --vllm_gpu_memory_utilization 0.9 \
-    --vllm_tensor_parallel_size 2 \
-    --vllm_max_model_len 32768 \
-    --max_new_tokens 15536 \
-    --vllm_limit_mm_per_prompt '{"image": 8, "video": 2}'
+--vllm_engine_kwargs '{"max_num_batched_tokens": 20000}'
 ```
-```text
-Failed: Cuda error /workspace/csrc/custom_all_reduce.cuh:368 'invalid argument'
+来增大 `max_num_batched_tokens`间接影响encoder cache size的分配。
+
+## 导出
+
+### Q1: autoawq相关的报错
+- 如果推理没有涉及AWQ量化模型，但出现了autoawq相关的报错，可以尝试卸载autoawq再进行推理。
+- 不支持AWQ量化的模型，可以尝试用GPTQ进行量化。
+
+### Q2: SWIFT量化模型时，一张卡上放不下模型的情况
+尝试设置`--device_map cpu`；或者多卡加载模型，单卡量化。
+
+### Q3: 用swift export对qwen2.5 72B模型进行gptq int4量化，max model length用的是默认值32768，给的校准数据集有128个样本，但是量化的时候报错了，报错日志如下：
+```shell
+factorization could not be completed because the input is not positive-definite(the leading minor of order 18145 is not pisitive-definite)
 ```
-加一下`--disable_custom_all_reduce true`。
+海森矩阵不正定的问题，试试其他的数据集。
 
-### Q38: 请问流式推理支持ddp吗？
-流式不支持ddp。
+### Q4: swift export的时候传入自定义的template_type,是否可以永久改掉template_type？
+不会被修改,swift中的template是定义在swift内部的,不是以jinja方式保存的。
 
-### Q39: 在Ovis2-2B推理的过程中出现的问题
-```text
-[rank1]: safetensors_rust.SafetensorError: Error while deserializing header:MetadataIncompleteBuffer
-Downloading Model from https://www.modelscope.cn to directory:/mnt/workspace/.cache/modelscope/hub/models/AIDC-AI/Ovis2-2B
-```
-模型权重损坏了。
-
-### Q40: 问一个问题，请问在grpo训练中如果做贪心搜索那么如何设置呢？文档中有说推理时可通过temprature=0设置为贪心搜索但是训练如果这样设置，计算logits / self.temperature，logits会出现很多nan，是不是将temperature设置为1，topk设置为1，topp也设置为1，模型推理就是贪心搜索的结果呢？
-topk设置成1就可以了。
-
-### Q41: 请问下，swift做量化时，gptq/awq/fp8三种方法分别是针对activation和weight中的哪个做的量化呢？
-只有权重。
-
-### Q42: 请问用ms-swift推理时pt engine和vllm engine，推理结果差了很多，这个是什么原因呢？
-看看参数有没有对齐。此外，vllmengine和ptengine是有差异的，pt engine和transformers推理是对齐的。
-
-### Q43: 请问用swift做qwen2audio的推理，推理结果出现混乱，可能是啥原因呢？
-使用transformers4.48。
-
-### Q44: 多卡推理，--max_batch_size是所有卡加起来的batch_size吗？
-不是，是每张卡的。
-
-### Q45: 推理只能传图片路径吗？有没有办法传Image对象？
-可以传`PIL.Image`。
-
-### Q46: swift训练的模型不能通过modelscope加载，怎么解决的？
-详见[issue#5440](https://github.com/modelscope/ms-swift/issues/5440)，transformers4.55.2训练的LoRA不能使用小于4.52的版本加载了。
-
-### Q47: 有没有示例脚本支持大模型推理的时候输出last_hidden_state？
-没有，可以参考grpo trainer的`_get_last_hidden_state`方法。
-
-### Q48: 请问，用--init_weights lora-ga微调完的adaper，推理的时候会报这种错误，如何解决？
-```text
-raise ValueError(f"Unknown initialization {init_lora_weights=}") ValueError: Unknown initialization init_lora_weights='lora-ga'
-```
-在你的checkpoint文件夹里面有一个叫converted的文件夹，用那个。
+### Q5: 模型训练完能直接转gguf格式吗？
+目前只支持导出ModelFile，详见[命令行参数文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html#id17)关于导出参数部分。
 
 ## 部署
 
-### Q1: 如何部署训练后的模型？
-`swift deploy --adapters xxx`，见文档[推理和部署](https://swift.readthedocs.io/zh-cn/latest/Instruction/Inference-and-deployment.html)。
+### Q1: SWIFT部署如何设置模型？
+- 全参数训练的模型、LoRA训练后合并的模型或者从model hub下载的模型，设置命令行参数`--model <model/id/or/path>`。
+- LoRA训练后未合并的模型，`--modelmodel/id/or/path>`指定基模路径的同时设置`--adapters <path/to/adapter>`。
 
-### Q2: 如何使用vllm部署进行多卡部署？
-详见[例子](https://github.com/modelscope/ms-swift/tree/main/examples/deploy)。
+### Q2: SWIFT如何进行多卡部署？
+详见[例子](https://github.com/modelscope/ms-swift/tree/main/examples/deploy)。如果是transformers engine，不支持DDP，不能多卡部署。此外，不支持异构部署，如不同型号的显卡、各显卡设置不同的存储占比等。
 
-### Q3: 请问用vllm部署的时候，客户端怎么传入图片？
-详见[客户端例子](https://github.com/modelscope/ms-swift/tree/main/examples/deploy/client/mllm)。
-
-### Q4: 有个问题想问一下，qwen2-7b部署后使用客户端时，调用openai的api要使用client.completions.create，不能使用client.chat.completions.create，但是使用qwen2-7b-instruct-q5_k_m.gguf的时候可以使用client.chat.completions.create，这是为什么呀？
-base模型可以用client.chat.completions.create的，不过这个是兼容行为。
-
-### Q5: 使用两张卡用swift deploy启动服务端后，用Ctrl+C退出后，会一直有一个python进程，一直占用一张卡的显存，这是正常现象吗？
-需要kill 一下, 这是vllm的问题。
-
-### Q6: 在哪查看模型是否支持lmdeploy或vllm加速？
-vllm和lmdeploy分别有自己的模型支持范围，请查看各自官方文档来确定是否可用。
-
-### Q7: 通义千问2.5-数学-7B-Instruct，会偶尔这样一直返回乱码，是什么问题呢？用vllm部署，fp16。
-尝试bf16。
-
-### Q8: swift推理服务启动后，交互进行设置的温度之类的配置，如何设置呢？
-推理只能启动前设置。部署可以在启动时设置默认，之后在客户端继续设置，覆盖默认。
-
-### Q9: 在本地部署qwen2vl模型，推理后端使用vllm，本地视频怎么传入呢？可以使用 base64 传进去吗？curl调用如何加载视频呢？
-base64，详见[mllm客户端例子](https://github.com/modelscope/ms-swift/tree/main/examples/deploy/client/mllm)
-
-### Q10: qwen2-vl部署时报错如下，是vllm的版本不对么？
-```text
-Unrecognized keys in `rope_scaling`for 'rope_type'='default': {'mrope_section'} Unrecognized keys in `rope_scaling`for 'rope_type'='default': {'mrope_section'}
-```
-详见[issue](https://github.com/QwenLM/Qwen2.5-VL/issues/209)。
-
-### Q11: 我用swift deploy做推理的时候，想让他输出token的概率，我加了logprobs True，但是它输出null，这个是什么原因呢？
-```shell
-RAY_memory_monitor_refresh_ms=0 CUDA_VISIBLE_DEVICES=1 nohup swift deploy --ckpt_dir /mnt/workspace/checkpoint_600 --infer_backend vllm --logprobs True --load_data_args false --host 0.0.0.0 --port 8000 &
-```
-需要客户端传参数，`request_config = RequestConfig(..., logprobs=True, top_logprobs=2)`。
-
-### Q12: swift3.0 部署推理，可以设置请求的超时时间么？如果图片url非法，会等在那里
-设置环境变量`SWIFT_TIMEOUT`。或者`InferClient`中可以传参数。
-
-### Q13: swift部署的模型怎么没法流式生成啊？服务端的stream设为True了，客户端的stream也设为True了，但它就是没法流式生成
-客户端控制的，查看[examples/deploy/client](https://github.com/modelscope/ms-swift/tree/main/examples/deploy/client)。
-
-### Q14: swift部署好多模态模型之后，客户端传PIL.Image，有示例没?
-看这个[client例子](https://github.com/modelscope/ms-swift/blob/main/examples/deploy/client/mllm/openai_client.py)。
-
-### Q15: 请问 deploy部署时候，设置什么参数可以实现一次输出，输出多个结果呢？
-`RequestConfig`参数`n`。
-
-### Q16: 比使用 swift deploy 部署，指定参数为 --infer_backend vllm，直接使用 vllm 部署：vllm serve ，效果差了接近10个点，有人知道什么原因不？
-估计是template没对上。
-
-### Q17: 部署命令怎么关闭qwem3的深度思考模式？
-查看这个[issue](https://github.com/modelscope/ms-swift/issues/4030)。
-
-### Q18: 请问，我用ms-swift的vllm部署推理，比原生vllm要慢很多，这个是swift框架的问题嘛？
-main分支应该默认使用V1 engine了，加一个`VLLM_USE_V1=1`试试，还有是图像分辨率，要对齐一下。
-
-### Q19: 如果swift部署用vllm加速，能分别指定不同卡上使用显存的比例吗？
-不支持异构。
-
-### Q20: 模型保存后，好像无法被vllm读取，会报错没有“model.language_model.embed_tokens.weight”，有解法吗？
-训练前后的transformers版本需要一致。
-
-### Q21: 通过--system参数指定system prompt与数据集中每个数据前加system prompt以及template的system prompt是不是有一个就行？这些方式对模型来说，是不是一样的？
+### Q3: 通过--system参数指定system prompt与数据集中每个数据前加system prompt以及template的system prompt是否选一操作即可？这些方式对模型来说，优先级是否一样？
 system优先级：数据集中的>命令行的>template中默认的。
 
-### Q22: swift pt engine部署模型后，推理无法并行，数据也没办法分配到其他显卡上，用的全是第一张卡。
-尝试swift infer，deploy不支持DDP。
+### Q4: 客户端多模态输入相关问题
+- 客户端传入图片、音频等，见[客户端例子](https://github.com/modelscope/ms-swift/tree/main/examples/deploy/client/mllm)。
+- 如果图片url非法，可以通过设置环境变量`SWIFT_TIMEOUT`，或者`InferClient`中传参数来设置请求的超时时间。
+
+### Q5: 生成参数设置相关问题
+- 推理生成参数（temperature 等）部署时可设默认值，客户端每次请求可动态覆盖；
+- 引擎/部署参数（TP 数、显存占比、最大长度）只能在部署启动时设置，运行后不可改。
+
+### Q6: SWIFT部署的模型怎么设置流式生成？
+是由客户端控制的，详情请查看[examples/deploy/client](https://github.com/modelscope/ms-swift/tree/main/examples/deploy/client)。
+
+### Q7: SWIFT部署如何输出token的概率？
+首先服务端需要设置`--logprobs true`，其次客户端需要传以下参数：
+```shell
+request_config = RequestConfig(..., logprobs=True, top_logprobs=2)
+```
+
+### Q8: thinking相关问题
+如果需要禁止思考，目前只能在swift deploy启动的时候禁止thinking。可以查看这个[issue](https://github.com/modelscope/ms-swift/issues/4030)。
+
+### Q9: 如何实现一次输出多个结果？
+在`RequestConfig`中传入参数`n`，如下所示：
+```shell
+response = client.infer([request], request_config=RequestConfig(
+    n=3,              # 生成 3 条
+    temperature=0.8,  # 需要有随机性才能产生不同结果
+))
+# response 包含 3 条不同的回答
+```
+
+### Q10: 指定--infer_backend vllm，和直接使用vllm部署推理结果有区别
+- 推理结果相差较多，可能是template没对齐。
+- 推理速度相差较多，可能是图像分辨率不一致。
+- SWIFT默认使用V1 engine，可以通过环境变量`VLLM_USE_V1=1`控制切换。
+
+### Q11: 特殊模型和依赖版本相关问题
+- 如果遇到报错没有`model.language_model.embed_tokens.weight`，可能由于训练-推理的transformers版本不一致导致。
+- qwen2.5使用fp16推理如果遇到返回乱码，尝试bf16。
+
+### Q12: Qwen2-7B base 模型部署后为什么不能用 chat.completions 而要用 completions？
+base 模型没有经过对话格式训练，它不认识 <|im_start|>user<|im_end|> 这类 chat special token。SWIFT框架做了处理，base模型也可以用client.chat.completions.create，不过这个是兼容行为，本质上还是把 messages 拼成纯文本做续写。
 
 ## 评测
 
-### Q1: swift支持的评测集有哪些？
-纯文本评测：
-```text
-'obqa', 'cmb', 'AX_b', 'siqa', 'nq', 'mbpp', 'winogrande', 'mmlu', 'BoolQ', 'cluewsc', 'ocnli', 'lambada',
-'CMRC', 'ceval', 'csl', 'cmnli', 'bbh', 'ReCoRD', 'math', 'humaneval', 'eprstmt', 'WSC', 'storycloze',
-'MultiRC', 'RTE', 'chid', 'gsm8k', 'AX_g', 'bustm', 'afqmc', 'piqa', 'lcsts', 'strategyqa', 'Xsum', 'agieval',
-'ocnli_fc', 'C3', 'tnews', 'race', 'triviaqa', 'CB', 'WiC', 'hellaswag', 'summedits', 'GaokaoBench',
-'ARC_e', 'COPA', 'ARC_c', 'DRCD'
-```
+ms-swift的eval能力使用了魔搭社区评测框架EvalScope, 复杂能力请直接使用[EvalScope框架](https://evalscope.readthedocs.io/zh-cn/latest/get_started/introduction.html)。
 
-多模态评测：
-```text
-'COCO_VAL', 'MME', 'HallusionBench', 'POPE', 'MMBench_DEV_EN', 'MMBench_TEST_EN', 'MMBench_DEV_CN', 'MMBench_TEST_CN',
-'MMBench', 'MMBench_CN', 'MMBench_DEV_EN_V11', 'MMBench_TEST_EN_V11', 'MMBench_DEV_CN_V11',
-'MMBench_TEST_CN_V11', 'MMBench_V11', 'MMBench_CN_V11', 'SEEDBench_IMG', 'SEEDBench2',
-'SEEDBench2_Plus', 'ScienceQA_VAL', 'ScienceQA_TEST', 'MMT-Bench_ALL_MI', 'MMT-Bench_ALL',
-'MMT-Bench_VAL_MI', 'MMT-Bench_VAL', 'AesBench_VAL', 'AesBench_TEST', 'CCBench', 'AI2D_TEST', 'MMStar',
-'RealWorldQA', 'MLLMGuard_DS', 'BLINK', 'OCRVQA_TEST', 'OCRVQA_TESTCORE', 'TextVQA_VAL', 'DocVQA_VAL',
-'DocVQA_TEST', 'InfoVQA_VAL', 'InfoVQA_TEST', 'ChartQA_TEST', 'MathVision', 'MathVision_MINI',
-'MMMU_DEV_VAL', 'MMMU_TEST', 'OCRBench', 'MathVista_MINI', 'LLaVABench', 'MMVet', 'MTVQA_TEST',
-'MMLongBench_DOC', 'VCR_EN_EASY_500', 'VCR_EN_EASY_100', 'VCR_EN_EASY_ALL', 'VCR_EN_HARD_500',
-'VCR_EN_HARD_100', 'VCR_EN_HARD_ALL', 'VCR_ZH_EASY_500', 'VCR_ZH_EASY_100', 'VCR_ZH_EASY_ALL',
-'VCR_ZH_HARD_500', 'VCR_ZH_HARD_100', 'VCR_ZH_HARD_ALL', 'MMDU', 'MMBench-Video', 'Video-MME'
-```
+### Q1: SWIFT支持的评测集有哪些？以及如何使用自定义评测集？
+标准评测集和用户自定义评测集的使用详见[评测文档](https://swift.readthedocs.io/zh-cn/latest/Instruction/Evaluation.html)。
 
-详见文档[评测](https://swift.readthedocs.io/zh-cn/latest/Instruction/Evaluation.html)。
+### Q2: 官方支持的评测数据集手动下载后，swift eval能配置本地路径评测吗？
+离线评测请参考EvalScope文档[快速上手](https://evalscope.readthedocs.io/zh-cn/latest/get_started/basic_usage.html)。
 
-### Q2: 如何使用自定义评测集？
-纯文本、多模态自定义评测集必须和某个官方评测集数据格式（pattern）保持一致，见文档[评测](https://swift.readthedocs.io/zh-cn/latest/Instruction/Evaluation.html)。
+### Q3: eval微调后的模型，总是会在固定的百分比停掉，但是vllm服务一直在正常运行
+客户端请求超过了默认超时时间，连接被断开了。可以将`SWIFT_TIMEOUT`环境变量设置为-1，关闭超时断开。
 
-### Q3: python3.11环境，评测时mmengine报错
-尝试python3.10环境。或先安装全量依赖： `pip3 install evalscope[all]`，再打patch： `pip3 install https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/package/evalscope-0.5.3.post1-py3-none-any.whl`。
+### Q4: 评估的时候可不可以控制数据集条数？
+配置参数`--eval_limit`，该参数控制了每个subset的条数，比如mmlu有50多个subset，每个subset limit10条，总共500多条。
 
-### Q4: 官方支持的评测数据集手动下载后，swift eval能配置本地路径评测吗？
-先下载评测数据集[eval.zip](https://modelscope.cn/datasets/swift/evalscope_resource/files)，解压后将里面的内容放到 `~/.cache/modelscope/media_resources/evalscope/data`文件夹下；再执行swift eval命令就可以使用本地数据。
-
-### Q5: 自定义评测是不是有bug，把标准例子改成英文，一直都跑不通？
+### Q5: 模型最多生成1024token就结束了，这个如何修改？尝试设置`--max_new_tokens`5000不起作用
+`--max_new_tokens`是推理参数，不是评测参数。评测时的生成长度由`--eval_generation_config`控制，需要在这个参数里设置`max_new_tokens`。
 ```shell
-swift eval --model_type 'qwen2_5-1_5b-instruct' --eval_dataset no --custom_eval_config '/mnt/workspace/test_data/config_eval.json'
+--eval_generation_config '{"max_new_tokens": 5000}'
 ```
-这是依赖了nltk的包，然后nltk的tokenizer需要下载一个punkt_tab的zip文件，国内有些环境下载不太稳定或者直接失败。已尝试改了代码做兜底，规避这个问题；参考[issue](https://github.com/nltk/nltk/issues/3293)。
 
-### Q6: eval微调后的模型，总是会在固定的百分比停掉，但是vllm服务看着一直是有在正常运行的。模型越大，断开的越早。
-`SWIFT_TIMEOUT`环境变量设置为-1。
-
-### Q7: evalscope 支持多模型对比吗？
-详见[文档](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/arena.html)。
-
-### Q8: 多模态数据集有没有自定义评估？
-多模态自定义评估可以参考[文档](https://evalscope.readthedocs.io/zh-cn/latest/advanced_guides/custom_dataset/index.html)。
-
-### Q9: ms-swift有方法测试qps，延迟，tokens/s吗？
-可以尝试使用evalscope的[模型推理性能压测](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/stress_test/index.html)。
-
-### Q10: 评估的时候可不可以控制数据集条数？评估一个mmlu需要一个多小时，也太慢了。
-配置参数`--eval_limit`，这里的`--eval_limit`是控制了每个subset的条数，比如mmlu有50多个subset，每个limit10条，那就是500多条。
-
-### Q11: 想请问一下，评测时不是相当于让模型输出一次回答然后检查答案对不对吗，有没有办法可以记录或看到每次完整的回答呢？
-ceval这种多选题的评测是通过计算每个选项的logits来得到的，没有输出回答内容；想得到回答内容的话，可以部署模型服务指定api url来评测，这样是通过解析模型输出来评测的，详见[文档](https://evalscope.readthedocs.io/zh-cn/latest/get_started/basic_usage.html#api)，后面这两种可以做成可选项。
-
-### Q12: 我想用evalscope压测一下我的模型，想采用prompt.txt文件的形式，这个文件内容的格式应该是什么样子的呀？
-配置line_by_line，详见[文档](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/stress_test/parameters.html#id5)。
-
-### Q13: 使用evalscope perf进行模型推理性能压测，parallel和number这两个参数怎样使用呢？
-number是请求的总数量，parallel是并发数量。
-
-### Q14: 问一下评估swift eval里，模型最多生成1024token就结束了，这个如何修改？设置--max_new_tokens 5000，看起来没起作用
-swift里面这个参数还没透出，可以使用evalscope来运行，model里面配置max_tokens参考[文档](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/backend/vlmevalkit_backend.html#id6)。
-
-### Q15: 请问evalscope现在支持deepseek-r1 的相关benchmark吗？AIME、MATH-500这样
-支持的，这里有[最佳实践](https://evalscope.readthedocs.io/zh-cn/latest/best_practice/deepseek_r1_distill.html)。
-
-### Q16: 想问一下evalscope测评gpqa使用本地路径报错： ValueError: BuildingConfig 'gpqa_extended' not found. Available: ['default']
-参数配置如下：
+### Q6: `--eval_backend OpenCompass`不支持自定义数据集吗？报错如下：
 ```shell
- --datasets gpqa --dataset-args '{"gpqa": {"local_path": "/mnt/workspace/gpqa"} }'
- ```
-数据集如果要下载到本地使用，建议从modelscope上克隆仓库再指定路径。
-
-### Q17: 用evalscope评测arc数据集的时候，报这个错误，这是什么原因呢，用的是加载本地数据路径方式
-```text
-KeyError: 'RequestId'
-```
-```shell
---datasets arc --dataset-args '{"arc": {"local_path": "/mnt/workspace/arc"}}'
-```
-参考[文档](https://evalscope.readthedocs.io/zh-cn/latest/get_started/basic_usage.html#id10)，arc数据集本身需要通过py脚本来下载数据，直接clone仓库不行。
-
-### Q18: 请教一下，想使用opencompass的后端评测，如何从本地加载下载好的数据集？
-opencompass后端不支持设置`data_args`。
-
-### Q19: swift eval 来评估模型，--eval_backend OpenCompass不支持自定义数据集吗？
-```text
 ValueError: eval_dataset: /mnt/workspace/data.jsonl is not supported.
 eval_backend: OpenCompass supported datasets: ['C3', 'summedits', 'WiC', 'csl', 'lambada', 'mbpp', 'hellaswag', 'ARC_e', 'math', 'nq', 'race', 'MultiRC', 'cmb', 'ceval', 'GaokaoBench', 'mmlu', 'winogrande', 'tnews', 'triviaqa', 'CB', 'cluewsc', 'humaneval', 'AX_g', 'DRCD', 'RTE', 'ocnli_fc', 'gsm8k', 'obqa', 'ReCoRD', 'Xsum', 'ocnli', 'WSC', 'siqa', 'agieval', 'piqa', 'cmnli', 'cmmlu', 'eprstmt', 'storycloze', 'AX_b', 'afqmc', 'strategyqa', 'bustm', 'BoolQ', 'COPA', 'ARC_c', 'PMMEval', 'chid', 'CMRC', 'lcsts']
 ```
-opencompass不支持自定义数据集，用native可以自定义模式。
+OpenCompass只支持其预定义的标准评测集，不支持自定义数据集，用native可以自定义模式。
 
-### Q20: 我在本地用单张A100运行模型来做evalscope官方文档里的[RAGAS评测任务](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/backend/rageval_backend/ragas.html)时，跑文档中的两个样例花费了10分钟的时间，请问这是正常的么？有没有什么办法可以优化运行速度。
-rag评测本身确实比较耗资源，使用本地critic llm确实会慢一些，处理不了batch请求，建议用vllm这样的框架来拉起任务。
-
-### Q21: 用evalscope评测RAG，但是嵌入式模型我也想用 API 方式调用，支持吗？我看文档上没有写
-目前embedding模型还没支持API调用，后续会支持。
-
-### Q22: 使用evalscpoe测试本地训练后的模型，测试数据输出是很简单的，但是训练模型的时候数据构造的是推理的方式，这样测试结果就比较低，请问evalscope怎么仅仅使用模型输出里<answer>xxx</answer>里的数据测试？
-dataset-args中设置 {"filters": {"remove_until": "</think>"}} ，参考这个[文档](https://evalscope.readthedocs.io/zh-cn/latest/get_started/parameters.html#id3)。设置这个参数，计算指标的时候会去掉`<think>`。
-
-### Q23: evalscope原生是可以生成报告的 其他后端如opencompass是不支持生成报告可视化是吗？
+### Q7: evalscope原生是可以生成报告的，其他后端如opencompass是否同样支持？
 目前只支持native的可视化，其他后端还不支持。
 
-### Q24: 请问一下评测ifeval报这个错是什么原因？
-```text
+### Q8: 评测ifeval报错：
+```shell
 [Errno 20] Not a directory: '/root/nltk_data/tokenizers/punkt_tab.zip/punkt_tab/english/collocations.tab'
 ```
-解压这个文件，`unzip /path/to/nltk_data/tokenizers/punkt_tab.zip`。
+需要解压`unzip /path/to/nltk_data/tokenizers/punkt_tab.zip`。
 
-### Q25: 请问评测时eval_backend='OpenCompass'，怎么指定离线数据集路径？
-查看[数据准备教程](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/backend/opencompass_backend.html#id3)，下载数据集并解压。不用指定`dataset-args`，将数据集文件夹（即data文件夹）放置在当前工作路径下即可。
+### Q9: eval_backend='OpenCompass'，怎么指定离线数据集路径？
+查看[数据准备教程](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/backend/opencompass_backend.html#id3)，下载数据集并解压。不用指定`dataset-args`，将数据集文件夹（即data文件夹）放置在当前工作路径下即可，OpenCompass会自动识别。
 
-### Q26: 用evalscope报这个错是什么原因
-```text
+### Q10: 报错：
+```shell
 unzip: cannot find or open /root/nltk_data/tokenizers/punkt_tab.zip, /root/nltk_data/tokenizers/punkt_tab.zip.zip or /root/nltk_data/tokenizers/punkt_tab.zip.ZIP
 ```
-这是在下载nltk的依赖，手动下载[punkt_tab.zip](https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/open_data/nltk_data/punkt_tab.zip)，解压到`~/nltk_data/tokenizers`下面。
+这是下载nltk的依赖失败，手动下载[punkt_tab.zip](https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/open_data/nltk_data/punkt_tab.zip)，解压到`~/nltk_data/tokenizers`下面。
 
-### Q27: 为啥纯文本没问题，测多模态我们指定路径了，但他还是检测不到数据集，会去下载？
-vlmevalkit流程跟native不一样，会自己下载数据放到`~/LMUData/`下面。
-
-### Q28: 请教下，evalscope的score是如何计算的，这部分有文档说明吗？
-请参考这个[issue](https://github.com/modelscope/evalscope/issues/610)。
-
-### Q29: 请问一下swift eval做benchmark评测的时候，是否可以指定llm作为judge, 参数应该怎么传进去？
-支持，使用swift得从`extra_eval_args`去传递`judge-model-args`参数，包括`api_key，api_url，model_id`，整体是一个json字符串。
-
-### Q30: 请问，思考模型怎么在response中去掉CoT再进行评测？vlmevalkit后端
-这个后处理还不支持。
-
-### Q31: 请问embedding评测，第一次运行会去官方下载数据集。可以下载后指定目录吗？
-目前embedding评测，只有自定义的数据集才能指定路径。
-
-### Q32: 请问怎么自定义评测指标？
-是想在自定义的数据集上使用自定义的评测指标吗？目前还没有plugin的方式，需自行修改evalscope/benchmarks/general_qa/general_qa_adapter.py 里面的match方法。
-
-### Q33: mmvet评测需要配置judge model，按这个[文档](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/backend/vlmevalkit_backend.html#id12)配置judge model，裁判模型的名称一定要是这三个里面的吗？
-```text
-Traceback (most recent call last):
-File "/usr/local/lib/python3.10/dist-packages/vlmeval/run.py", line 484, in run_task eval_results = dataset.evaluate(result_file,**judge_kwargs )
-File "/usr/local/lib/python3.10/dist-packages/vlmeval/dataset/image_mcq.py", line 244, in evaluate assert model in ['chatgpt-0125'， 'exact_matching'，'gpt-4-0125'] AssertionError
+### Q11: 是否可以指定llm作为judge, 参数应该怎么传进去？
+支持的，参数传递如下所示：
+```shell
+--extra_eval_args '{"judge-model-args": {"api_key": "xxx", "api_url": "http://xxx/v1", "model_id": "qwen-72b"}}'
 ```
-```python
-task_cfg_dict = TaskConfig(
-    work_dir='outputs',
-    eval_backend='VLMEvalKit',
-    eval_config={
-        'data': ['MMVet', 'DocVQA_VAL', 'MMBench_DEV_EN'],
-        'limit': 20,
-        'mode': 'all',
-        'model': [
-            {'api_base': 'http://127.0.0.1:8001/v1/chat/completions',
-            'key': 'EMPTY',
-            'name': 'CustomAPIModel',
-            'temperature': 0.0,
-            'type': 'Qwen2.5-VL-72B-Instruct-AWQ',
-            'img_size': -1,
-            'video_llm': False,
-            'max_tokens': 1024,}
-            ],
-        'reuse': False,
-        'nproc': 100,
-        'judge': 'exact_matching'}
-)
-```
-对于多选题问答，是有这个要求，不然的话就指定exact_matching。试试MMBench跟MMVet的评测分开，不使用judge model。
 
-### Q34: 请问在执行eval的时候出现了多卡显存分配不均是什么原因？
+### Q12: 在执行eval的时候出现了多卡显存分配不均，报错如下：
 ```shell
 NPROC_PER_NODE=8
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7\ MAX_PIXELS=802816\ swift eval\
 --model "$MODEL_PATH” \$EXTRA_ARGS \
---eval_backend Native \ --infer_backend pt\ --device_map auto \
+--eval_backend Native \ --infer_backend transformers\ --device_map auto \
 --eval_limit"$EVAL_LIMIT"\ --eval_dataset general_qa\
 --dataset_args "{\"general_qa\": {\"local_path\": \"${DATA_PATH}\", \"subset_list\": [\"${SUBSET_NAME}\"]}}" \ --host 127.0.0.1\> "$LOG_FILE" 2>&1
 ```
-swift eval不支持ddp方式启动。
+swift eval不支持DDP方式启动。
 
-### Q35: 请问，使用evalscope评测 如何控制input token为固定长度？
-控制长度只支持random数据集，参考[文档](https://evalscope.readthedocs.io/zh-cn/latest/user_guides/stress_test/examples.html#random)。
+### Q13: 哪里可以看到swift评测的时候送入的query除了问题之外还有哪些额外的字段呢？
+最简单的方法是看输出的reviews文件中的input字段，是输入给模型的内容转换后的Markdown格式。<br>
+如果backend是opencompass的话没有这些输出，就需要用native backend。
+
+### Q14: pip安装evalscope的时候一直卡在preparing metadata(pyproject.toml)
+这一过程是在安装评估依赖，可能会比较慢。

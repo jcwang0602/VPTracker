@@ -1,15 +1,13 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
+# Copyright (c) ModelScope Contributors. All rights reserved.
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 import math
 import re
-import warnings
-from itertools import chain
-from typing import Dict, List, Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings
+from itertools import chain
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.tuners.lora import Conv2d as _Conv2d
 from peft.tuners.lora import Embedding as _Embedding
@@ -20,6 +18,7 @@ from peft.tuners.lora.tp_layer import LoraParallelLinear as _LoraParallelLinear
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils import _get_submodules, get_quantization_config
 from transformers import Conv1D
+from typing import Dict, List, Optional
 
 from swift.utils import get_logger
 from .peft import LoraConfig
@@ -39,7 +38,7 @@ class LoRAActivationMixin(ActivationMixin):
     def active_adapter(self) -> str:
         return self.get_activated_adapters()
 
-    def set_adapter(self, adapter_names, offload=None):
+    def set_adapter(self, adapter_names, inference_mode: bool = False, offload=None):
         if isinstance(adapter_names, str):
             adapter_names = [adapter_names]
 
@@ -47,7 +46,7 @@ class LoRAActivationMixin(ActivationMixin):
         for layer_name in self.adapter_layer_names:
             module_dict = getattr(self, layer_name)
             for key, layer in module_dict.items():
-                if key in adapter_names:
+                if key in adapter_names and (not inference_mode):
                     self.set_activation(key, True)
                     layer.requires_grad_(True)
                     SwiftAdapter.save_memory(layer, key, self.module_key, True)
@@ -518,7 +517,7 @@ class LoRALayer(ActivationMixin):
         adapter_name: str,
         module_key: str,
         r: int,
-        lora_alpha: int,
+        lora_alpha: float,
         lora_dropout: float,
         merge_weights: bool,
     ):
@@ -545,7 +544,7 @@ class MergedLinear(nn.Linear, LoRALayer):
                  module_key: str,
                  base_layer: nn.Linear,
                  r: int = 0,
-                 lora_alpha: int = 1,
+                 lora_alpha: float = 1.0,
                  lora_dropout: float = 0.,
                  enable_lora: List[bool] = [False],
                  fan_in_fan_out: bool = False,

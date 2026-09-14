@@ -1,4 +1,4 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
+# Copyright (c) ModelScope Contributors. All rights reserved.
 import os
 from typing import List
 
@@ -46,15 +46,14 @@ def run_client(host: str = '127.0.0.1', port: int = 8000):
     infer_batch(engine, infer_requests)
 
     messages = [{'role': 'user', 'content': 'who are you?'}]
-    infer_stream(engine, InferRequest(messages=messages))
+    infer_stream(engine, InferRequest(messages=messages, chat_template_kwargs={'enable_thinking': False}))
 
 
 if __name__ == '__main__':
-    from swift.llm import (InferEngine, InferRequest, InferClient, RequestConfig, load_dataset, run_deploy,
-                           DeployArguments)
-    from swift.plugin import InferStats
+    from swift import (DeployArguments, InferClient, InferEngine, InferRequest, InferStats, RequestConfig, load_dataset,
+                       run_deploy)
+
     # NOTE: In a real deployment scenario, please comment out the context of run_deploy.
-    with run_deploy(
-            DeployArguments(model='Qwen/Qwen2.5-1.5B-Instruct', verbose=False, log_interval=-1,
-                            infer_backend='vllm')) as port:
+    with run_deploy(DeployArguments(model='Qwen/Qwen3.5-4B', verbose=False, log_interval=-1,
+                                    infer_backend='vllm')) as port:
         run_client(port=port)

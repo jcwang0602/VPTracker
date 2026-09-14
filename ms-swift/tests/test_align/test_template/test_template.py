@@ -1,9 +1,10 @@
-from swift.llm import TemplateInputs, get_model_tokenizer, get_template
+from swift.model import get_processor
+from swift.template import TemplateInputs, get_template
 
 
 def test_deepseek_v2_5():
-    tokenizer = get_model_tokenizer('deepseek-ai/DeepSeek-V2.5-1210', load_model=False)[1]
-    template = get_template(tokenizer.model_meta.template, tokenizer)
+    tokenizer = get_processor('deepseek-ai/DeepSeek-V2.5-1210')
+    template = get_template(tokenizer)
     inputs = TemplateInputs({
         'messages': [{
             'role': 'system',
@@ -28,8 +29,8 @@ def test_deepseek_v2_5():
 
 
 def test_qwen2_5_math_reward():
-    tokenizer = get_model_tokenizer('Qwen/Qwen2.5-Math-RM-72B', load_model=False)[1]
-    template = get_template(tokenizer.model_meta.template, tokenizer)
+    tokenizer = get_processor('Qwen/Qwen2.5-Math-RM-72B')
+    template = get_template(tokenizer)
     inputs = TemplateInputs({
         'messages': [{
             'role':
@@ -65,8 +66,8 @@ def test_qwen2_5_math_reward():
 
 
 def test_minimax():
-    tokenizer = get_model_tokenizer('MiniMax/MiniMax-Text-01', load_model=False)[1]
-    template = get_template(tokenizer.model_meta.template, tokenizer)
+    tokenizer = get_processor('MiniMax/MiniMax-Text-01')
+    template = get_template(tokenizer)
     inputs = TemplateInputs({
         'messages': [{
             'role': 'system',
@@ -85,8 +86,8 @@ def test_minimax():
 
 
 def test_minimax_vl():
-    tokenizer = get_model_tokenizer('MiniMax/MiniMax-VL-01', load_model=False)[1]
-    template = get_template(tokenizer.model_meta.template, tokenizer)
+    tokenizer = get_processor('MiniMax/MiniMax-VL-01')
+    template = get_template(tokenizer)
     inputs = TemplateInputs({
         'messages': [{
             'role': 'system',
@@ -102,8 +103,8 @@ def test_minimax_vl():
 
 
 def test_deepseek_v3_1():
-    tokenizer = get_model_tokenizer('deepseek-ai/DeepSeek-V3.1', load_model=False)[1]
-    template = get_template(tokenizer.model_meta.template, tokenizer)
+    tokenizer = get_processor('deepseek-ai/DeepSeek-V3.1')
+    template = get_template(tokenizer)
     inputs = {
         'messages': [{
             'role': 'system',
@@ -127,9 +128,41 @@ def test_deepseek_v3_1():
     assert res['input_ids'] == res2['input_ids']
 
 
+def test_preserve_thinking():
+    tokenizer = get_processor('Qwen/Qwen3.6-35B-A3B')
+    template = get_template(tokenizer, preserve_thinking=True)
+    template.set_mode('train')
+    inputs = {
+        'messages': [{
+            'role': 'system',
+            'content': '000'
+        }, {
+            'role': 'user',
+            'content': 'aaa'
+        }, {
+            'role': 'assistant',
+            'content': '<think>\nbbb\n</think>\n\nbbb'
+        }, {
+            'role': 'user',
+            'content': 'ccc'
+        }, {
+            'role': 'assistant',
+            'content': '<think>\nddd\n</think>\n\nddd'
+        }]
+    }
+    template.template_backend = 'swift'
+    res = template.encode(inputs)
+    template.print_inputs(res)
+    template.template_backend = 'jinja'
+    res2 = template.encode(inputs)
+    template.print_inputs(res2)
+    assert res['input_ids'] == res2['input_ids']
+
+
 if __name__ == '__main__':
     # test_deepseek_v2_5()
     # test_qwen2_5_math_reward()
     # test_minimax()
     # test_minimax_vl()
-    test_deepseek_v3_1()
+    # test_deepseek_v3_1()
+    test_preserve_thinking()

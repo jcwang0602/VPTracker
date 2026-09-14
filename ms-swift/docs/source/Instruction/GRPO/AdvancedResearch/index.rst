@@ -4,9 +4,16 @@ Advanced Research
    :maxdepth: 1
 
    entropy_mask.md
+   CISPO.md
    DAPO.md
    deepeyes.md
+   FIPO.md
    GSPO.md
+   CHORD.md
    RLOO.md
    REINFORCEPP.md
-   CHORD.md
+   REAL.md
+   router_replay.md
+   SAPO.md
+   training_inference_mismatch.md
+   treepo.md

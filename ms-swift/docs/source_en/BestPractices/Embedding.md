@@ -14,6 +14,13 @@ SWIFT has already supported the training of embedding models, including both pur
    - 0.6B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)
    - 4B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-Embedding-4B)
    - 8B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-Embedding-8B)
+5. qwen3-vl-embedding models
+   - 2B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-VL-Embedding-2B)
+   - 8B: [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B) [Hugging Face](https://huggingface.co/Qwen/Qwen3-VL-Embedding-8B)
+6. uembed embedding models
+   - 2B: [ModelScope](https://modelscope.cn/models/iic/UEmbed-2B) [Hugging Face](https://huggingface.co/Alibaba-NLP/UEmbed-2B)
+   - 4B: [ModelScope](https://modelscope.cn/models/iic/UEmbed-4B) [Hugging Face](https://huggingface.co/Alibaba-NLP/UEmbed-4B)
+   - 9B: [ModelScope](https://modelscope.cn/models/iic/UEmbed-9B) [Hugging Face](https://huggingface.co/Alibaba-NLP/UEmbed-9B)
 
 Developers can integrate their own models by ensuring the model forward output satisfies:
 
@@ -41,7 +48,7 @@ The Embedding models supported by SWIFT currently can use the following loss fun
 - **online_contrastive**: Contrastive loss considering hard negatives and hard positives. Labels are only supported as 0 and 1.
 - **infonce**: Computes pairwise cosine similarities between different rows within the same batch, maximizing similarity within rows and minimizing similarity between different rows. No labels are required.
 
-The source code for the loss functions can be found [here](https://github.com/modelscope/ms-swift/blob/main/swift/plugin/loss.py).
+The source code for the loss functions can be found [here](https://github.com/modelscope/ms-swift/blob/main/swift/loss/mapping.py).
 
 ## Dataset Format
 
@@ -87,7 +94,7 @@ The eval metrics are the Pearson and Spearman's Rank Correlation Coefficient of 
 ```
 
 InfoNCE loss supports the following environment variables:
-1. `INFONCE_TEMPERATURE`: The temperature parameter. If not set, the default value is 0.01.
+1. `INFONCE_TEMPERATURE`: The temperature parameter. If not set, the default value is 0.1.
 2. `INFONCE_USE_BATCH`: Use `negative_messages` within the sample (hard negatives) or use other samples in the batch as in-batch negatives. The default is `True`, which means using in-batch negatives.
 3. `INFONCE_HARD_NEGATIVES`: The number of hard negatives. If not set, all provided `negative_messages` will be used. Since the lengths may vary, a for loop will be used to compute the loss (slower). If set to a specific number, missing items will be randomly sampled, and excess items will be truncated to the first `INFONCE_HARD_NEGATIVES`.
 4. `INFONCE_MASK_FAKE_NEGATIVE`: Masks out fake negatives. The default is `False`. When enabled, it checks `positive_similarity + INFONCE_FAKE_NEG_MARGIN`; any sample with similarity larger than this threshold will have its similarity set to `-inf` to prevent positive leakage.
@@ -104,16 +111,17 @@ The evaluation of InfoNCE loss includes the following metrics:
 - mean_pos: The average of all positives
 - margin: The average of (positive - max hard negative)
 
-## Scaffolding
+## Training
 
-SWIFT provides two scaffold training scripts:
+Training scripts provided by ms-swift:
 
-- [Qwen3-Embedding model](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding/train_emb.sh)
+- [Qwen3-Embedding/Qwen3-VL-Embedding model](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding/qwen3)
 - [GME model](https://github.com/modelscope/ms-swift/blob/main/examples/train/embedding/train_gme.sh)
 
 ## Inference
 
-SWIFT has supported the deployment of GME、GTE、Qwen3-Embedding models，please check[here](https://github.com/modelscope/ms-swift/blob/main/examples/deploy/embedding/client.py).
+SWIFT has supported the deployment of GME, GTE, Qwen3-Embedding models, please check [here](https://github.com/modelscope/ms-swift/blob/main/examples/deploy/embedding/client.py).
+- For inference scripts, please refer to [here](https://github.com/modelscope/ms-swift/blob/main/examples/infer/demo_embedding.py).
 
 You can also use the original model's code for inference:
 

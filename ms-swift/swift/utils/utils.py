@@ -1,8 +1,13 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
+# Copyright (c) ModelScope Contributors. All rights reserved.
+import asyncio
 import datetime as dt
 import fnmatch
 import glob
-import importlib
+import hashlib
+import importlib.util
+import json
+import json_repair
+import numpy as np
 import os
 import random
 import re
@@ -10,17 +15,15 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
-from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Type, TypeVar, Union
-
-import json
-import json_repair
-import numpy as np
 import torch
 import torch.distributed as dist
+from contextlib import contextmanager
+from functools import wraps
 from transformers import HfArgumentParser, enable_full_determinism, set_seed
 from transformers.utils import strtobool
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Type, TypeVar, Union
 
 from .env import is_dist, is_master
 from .logger import get_logger
@@ -81,10 +84,13 @@ def _get_version(work_dir: str) -> int:
 
 
 def format_time(seconds):
-    days = int(seconds // (24 * 3600))
-    hours = int((seconds % (24 * 3600)) // 3600)
-    minutes = int((seconds % 3600) // 60)
-    seconds = int(seconds % 60)
+    # Round the total first, then decompose, so a rounded-up second carries into
+    # the minute (and cascades) instead of printing an impossible '60s'.
+    total = round(seconds)
+    days = total // (24 * 3600)
+    hours = (total % (24 * 3600)) // 3600
+    minutes = (total % 3600) // 60
+    seconds = total % 60
 
     if days > 0:
         time_str = f'{days}d {hours}h {minutes}m {seconds}s'
@@ -110,7 +116,7 @@ def deep_getattr(obj, attr: str, default=None):
     return obj
 
 
-def seed_everything(seed: Optional[int] = None, full_determinism: bool = False, *, verbose: bool = True) -> int:
+def seed_everything(seed: Optional[int] = None, full_determinism: bool = False) -> int:
 
     if seed is None:
         seed_max = np.iinfo(np.int32).max
@@ -120,8 +126,6 @@ def seed_everything(seed: Optional[int] = None, full_determinism: bool = False, 
         enable_full_determinism(seed)
     else:
         set_seed(seed)
-    if verbose:
-        logger.info(f'Global seed set to {seed}')
     return seed
 
 
@@ -142,20 +146,51 @@ def add_version_to_work_dir(work_dir: str) -> str:
 _T = TypeVar('_T')
 
 
+def _patch_args(class_type):
+    try:
+        for k, v in class_type.__annotations__.items():
+            if v == Union[str, dict, type(None)]:
+                class_type.__annotations__[k] = Union[dict, str, type(None)]
+    except Exception:
+        logger.warning('patch args failed')
+
+
+@contextmanager
+def _patch_get_type_hints():
+    # Fix parsing string arguments into dicts
+    from transformers import hf_argparser
+    origin_get_type_hints = hf_argparser.get_type_hints
+
+    def get_type_hints(*args, **kwargs):
+        kwargs = origin_get_type_hints(*args, **kwargs)
+        for k, v in kwargs.items():
+            if v == Union[str, dict, type(None)]:
+                kwargs[k] = Union[dict, str, type(None)]
+        return kwargs
+
+    hf_argparser.get_type_hints = get_type_hints
+    try:
+        yield
+    finally:
+        hf_argparser.get_type_hints = origin_get_type_hints
+
+
 def parse_args(class_type: Type[_T], argv: Optional[List[str]] = None) -> Tuple[_T, List[str]]:
-    parser = HfArgumentParser([class_type])
+    with _patch_get_type_hints():
+        parser = HfArgumentParser([class_type])
     _ray_args = os.environ.get('RAY_SWIFT_ARGS')
     if _ray_args:
         argv = json.loads(_ray_args)
     elif argv is None:
         argv = sys.argv[1:]
-    if len(argv) > 0 and argv[0].endswith('.json'):
-        json_path = os.path.abspath(os.path.expanduser(argv[0]))
-        args, = parser.parse_json_file(json_path)
-        remaining_args = argv[1:]
-    else:
-        args, remaining_args = parser.parse_args_into_dataclasses(argv, return_remaining_strings=True)
+    args, remaining_args = parser.parse_args_into_dataclasses(argv, return_remaining_strings=True)
     return args, remaining_args
+
+
+def parse_args_from_dict(class_type: Type[_T], args: Dict[str, Any]) -> _T:
+    with _patch_get_type_hints():
+        parser = HfArgumentParser([class_type])
+    return parser.parse_dict(args, allow_extra_keys=True)[0]
 
 
 def lower_bound(lo: int, hi: int, cond: Callable[[int], bool]) -> int:
@@ -220,7 +255,7 @@ def read_multi_line(addi_prompt: str = '') -> str:
 
 
 def subprocess_run(command: List[str], env: Optional[Dict[str, str]] = None, stdout=None, stderr=None):
-    # stdoutm stderr: e.g. subprocess.PIPE.
+    # stdout stderr: e.g. subprocess.PIPE.
     import shlex
     command_str = ' '.join(shlex.quote(a) for a in command)
     logger.info_if(f'Run the command: `{command_str}`', is_master())
@@ -245,10 +280,20 @@ def get_env_args(args_name: str, type_func: Callable[[str], _T], default_value: 
     return value
 
 
-def find_node_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(('8.8.8.8', 80))
-    return s.getsockname()[0]
+def find_node_ip() -> Optional[str]:
+    import psutil
+    main_ip, virtual_ip = None, None
+    for name, addrs in sorted(psutil.net_if_addrs().items()):
+        for addr in addrs:
+            if addr.family.name == 'AF_INET' and not addr.address.startswith('127.'):
+                # Heuristic to prefer non-virtual interfaces
+                if any(s in name for s in ['lo', 'docker', 'veth', 'vmnet']):
+                    if virtual_ip is None:
+                        virtual_ip = addr.address
+                else:
+                    if main_ip is None:
+                        main_ip = addr.address
+    return main_ip or virtual_ip
 
 
 def find_free_port(start_port: Optional[int] = None, retry: int = 100) -> int:
@@ -357,12 +402,89 @@ def patch_getattr(obj_cls, item_name: str):
     obj_cls._patch = True
 
 
+# External plugin files imported into this process, in import order. See get_external_files.
+_external_files: List[str] = []
+
+
 def import_external_file(file_path: str):
     file_path = os.path.abspath(os.path.expanduser(file_path))
-    py_dir, py_file = os.path.split(file_path)
+    py_dir = os.path.dirname(file_path)
     assert os.path.isdir(py_dir), f'py_dir: {py_dir}'
     sys.path.insert(0, py_dir)
-    return importlib.import_module(py_file.split('.', 1)[0])
+    if file_path not in _external_files:
+        _external_files.append(file_path)
+    module_name = f'_swift_external_{hashlib.sha256(file_path.encode()).hexdigest()}'
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f'Cannot import external file: {file_path}')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def get_external_files() -> List[str]:
+    """Return the external plugin files imported into this process, in import order.
+
+    Plugins take effect through import side effects, so a worker process that does not inherit the
+    parent's memory (``forkserver``/``spawn``) has to replay them. Resolve this in the parent and pass
+    the result to the worker: the paths then travel across the pickle boundary, which the module-level
+    record itself does not.
+    """
+    return list(_external_files)
+
+
+class _WorkerInitWithPlugins:
+    """``worker_init_fn`` that replays the plugin imports, then delegates to the original one.
+
+    A plain class rather than a closure so that it survives being pickled to a ``spawn`` worker.
+    """
+
+    def __init__(self, inner: Optional[Callable], external_files: Sequence[str]):
+        self.inner = inner
+        self.external_files = external_files
+
+    def __call__(self, worker_id: int) -> None:
+        for file_path in self.external_files:
+            import_external_file(file_path)
+        if self.inner is not None:
+            self.inner(worker_id)
+
+
+def patch_dataloader_external_plugins():
+    """Make every dataloader worker replay the ``--external_plugins`` imports.
+
+    Plugins take effect through import side effects. A forked worker inherits those for free, but a
+    ``forkserver``/``spawn`` worker starts from a clean interpreter, so whatever a plugin registered
+    into a global table -- an extra PIL codec is the motivating case -- is silently missing by the time
+    the worker looks it up. Patching the constructor instead of every call site keeps this working for
+    the dataloaders swift does not build itself (transformers, accelerate's rebuild in ``prepare``) and
+    for any added later.
+
+    Wrapping after ``__init__`` has run avoids caring whether ``worker_init_fn`` was passed positionally,
+    and torch allows the assignment because ``worker_init_fn`` is not one of its frozen attributes.
+    """
+    from torch.utils.data import DataLoader
+    if getattr(DataLoader, '_swift_external_plugins', False):
+        return
+    origin_init = DataLoader.__init__
+
+    @wraps(origin_init)
+    def __init__(self, *args, **kwargs):
+        origin_init(self, *args, **kwargs)
+        # Resolved here, in the parent: the paths travel to the worker inside this object, which the
+        # module-level record does not.
+        if self.num_workers > 0 and not isinstance(self.worker_init_fn, _WorkerInitWithPlugins):
+            self.worker_init_fn = _WorkerInitWithPlugins(self.worker_init_fn, get_external_files())
+
+    DataLoader.__init__ = __init__
+    DataLoader._swift_external_plugins = True
 
 
 def json_parse_to_dict(value: Union[str, Dict, None], strict: bool = True) -> Union[str, Dict]:
@@ -392,6 +514,70 @@ def json_parse_to_dict(value: Union[str, Dict, None], strict: bool = True) -> Un
     return value
 
 
+def retry_decorator(retry=3):
+
+    def _retry(func):
+
+        @wraps(func)
+        def new_func(*args, **kwargs):
+            i = 1
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception:
+                    if i == retry:
+                        raise
+                    i += 1
+
+        return new_func
+
+    return _retry
+
+
+def start_event_loop_in_daemon(name: str = None) -> Tuple[threading.Thread, asyncio.AbstractEventLoop, threading.Event]:
+    """Create a new daemon thread that runs an asyncio event loop.
+
+    Args:
+        name: Name of the thread. If None, the default thread naming will be used.
+
+    Returns:
+        tuple: (thread, loop, loop_ready_event)
+            - thread: The thread running the event loop.
+            - loop: The event loop being run in the thread.
+            - loop_ready_event: An event that is set when the loop is ready.
+    """
+    loop = asyncio.new_event_loop()
+    loop_ready_event = threading.Event()
+
+    def run_loop():
+        asyncio.set_event_loop(loop)
+        loop_ready_event.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=run_loop, name=name, daemon=True)
+    thread.start()
+    return thread, loop, loop_ready_event
+
+
+def shutdown_event_loop_in_daemon(thread: threading.Thread = None, loop: asyncio.AbstractEventLoop = None) -> None:
+    """Shutdown an asyncio event loop running in a separate thread.
+
+    This function stops the event loop and waits for the associated thread to finish execution.
+
+    Args:
+        thread: The thread running the event loop.
+        loop: The asyncio event loop to shut down.
+    """
+    if loop is None or thread is None:
+        return
+    if loop.is_closed():
+        return
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=5)
+    if not thread.is_alive():
+        loop.close()
+
+
 def remove_response(messages) -> Optional[str]:
     """
     Removes and returns the content of the last message if its role is 'assistant'.
@@ -410,12 +596,34 @@ def remove_response(messages) -> Optional[str]:
         return messages.pop()['content']
 
 
-@contextmanager
-def disable_deepspeed_zero3():
-    import transformers.integrations.deepspeed as ds_module
-    orig_weak_ref = ds_module._hf_deepspeed_config_weak_ref
-    ds_module._hf_deepspeed_config_weak_ref = None
+def to_abspath(path: Union[str, List[str], None], check_path_exist: bool = False) -> Union[str, List[str], None]:
+    """Check the path for validity and convert it to an absolute path.
+
+    Args:
+        path: The path to be checked/converted
+        check_path_exist: Whether to check if the path exists
+
+    Returns:
+        Absolute path
+    """
+    if path is None:
+        return
+    elif isinstance(path, str):
+        # Remove user path prefix and convert to absolute path.
+        path = os.path.abspath(os.path.expanduser(path))
+        if check_path_exist and not os.path.exists(path):
+            raise FileNotFoundError(f"path: '{path}'")
+        return path
+    assert isinstance(path, list), f'path: {path}'
+    res = []
+    for v in path:
+        res.append(to_abspath(v, check_path_exist))
+    return res
+
+
+def swanlab_get_run():
     try:
-        yield
-    finally:
-        ds_module._hf_deepspeed_config_weak_ref = orig_weak_ref
+        import swanlab
+        return swanlab.get_run()
+    except (RuntimeError, ImportError):
+        return None

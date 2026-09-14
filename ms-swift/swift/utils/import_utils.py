@@ -1,4 +1,4 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
+# Copyright (c) ModelScope Contributors. All rights reserved.
 # Copyright 2023-present the HuggingFace Inc. team.
 
 import importlib.util
@@ -7,10 +7,6 @@ from itertools import chain
 from types import ModuleType
 from typing import Any
 
-from .logger import get_logger
-
-logger = get_logger()  # pylint: disable=invalid-name
-
 
 def is_vllm_available():
     return importlib.util.find_spec('vllm') is not None
@@ -18,6 +14,14 @@ def is_vllm_available():
 
 def is_vllm_ascend_available():
     return importlib.util.find_spec('vllm_ascend') is not None
+
+
+def is_vllm_metax_available():
+    return importlib.util.find_spec('vllm_metax') is not None
+
+
+def is_vllm_kunlun_available():
+    return importlib.util.find_spec('vllm_kunlun') is not None
 
 
 def is_lmdeploy_available():

@@ -1,4 +1,4 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
+# Copyright (c) ModelScope Contributors. All rights reserved.
 
 
 def try_init_unsloth():
@@ -14,7 +14,7 @@ if __name__ == '__main__':
     from swift.cli.utils import try_use_single_device_mode
     try_use_single_device_mode()
     try_init_unsloth()
-    from swift.ray import try_init_ray
+    from swift.ray_utils import try_init_ray
     try_init_ray()
-    from swift.llm import sft_main
+    from swift.pipelines import sft_main
     sft_main()

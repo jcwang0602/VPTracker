@@ -1,7 +1,7 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
+os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
 kwargs = {
     'per_device_train_batch_size': 2,
     'save_steps': 5,
@@ -11,7 +11,7 @@ kwargs = {
 
 
 def test_llm():
-    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
+    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='kto',
@@ -24,7 +24,7 @@ def test_llm():
 
 
 def test_mllm():
-    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
+    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='kto',

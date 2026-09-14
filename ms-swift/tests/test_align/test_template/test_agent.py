@@ -2,7 +2,7 @@ import os
 
 os.environ['SWIFT_DEBUG'] = '1'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-
+os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1,2,3'
 system = 'You are a helpful assistant.'
 
 tools = [{
@@ -70,7 +70,7 @@ def _infer(engine, num_tools: int = 1, agent_tools=None, tool_messages=None, que
                 'role': 'tool',
                 'content': '{"temperature": 32, "condition": "Sunny", "humidity": 50}'
             })
-    stop = [engine.default_template.agent_template.keyword.observation]
+    stop = [engine.template.agent_template.keyword.observation]
     query = query or "How's the weather in Beijing today?"
     infer_request = InferRequest([{'role': 'user', 'content': query}], tools=agent_tools)
     request_config = RequestConfig(max_tokens=512, stop=stop, temperature=0)
@@ -90,12 +90,12 @@ def _infer(engine, num_tools: int = 1, agent_tools=None, tool_messages=None, que
 
 
 def test_react_en():
-    agent_template = agent_templates['react_en']()
+    agent_template = agent_template_map['react_en']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 1144
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'react_en'
     messages = _infer(engine)
     assert messages[-1]['content'] == (
         'Thought: The current temperature in Beijing is 32 degrees Celsius, and the condition is sunny '
@@ -117,22 +117,22 @@ def test_react_en():
 
 
 def test_react_zh():
-    agent_template = agent_templates['react_zh']()
+    agent_template = agent_template_map['react_zh']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 712
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'react_zh'
     _infer(engine)
 
 
 def test_qwen_en():
-    agent_template = agent_templates['qwen_en']()
+    agent_template = agent_template_map['qwen_en']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 879
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'qwen_en'
     messages = _infer(engine)
     assert messages[-1]['content'] == (
         '✿RETURN✿: Today in Beijing, the temperature is 32°C with sunny conditions and the humidity '
@@ -153,22 +153,22 @@ def test_qwen_en():
 
 
 def test_qwen_zh():
-    agent_template = agent_templates['qwen_zh']()
+    agent_template = agent_template_map['qwen_zh']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 577
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'qwen_zh'
     _infer(engine)
 
 
 def test_qwen_en_parallel():
-    agent_template = agent_templates['qwen_en_parallel']()
+    agent_template = agent_template_map['qwen_en_parallel']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 1012
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'qwen_en_parallel'
     messages = _infer(engine, num_tools=2)
     assert messages[-1]['content'] == (
         '✿RETURN✿: Today in Beijing, the temperature is 32 degrees Celsius with sunny conditions '
@@ -189,22 +189,22 @@ def test_qwen_en_parallel():
 
 
 def test_qwen_zh_parallel():
-    agent_template = agent_templates['qwen_zh_parallel']()
+    agent_template = agent_template_map['qwen_zh_parallel']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 688
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'qwen_zh_parallel'
     _infer(engine, num_tools=2)
 
 
 def test_hermes():
-    agent_template = agent_templates['hermes']()
+    agent_template = agent_template_map['hermes']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 875
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'hermes'
     messages = _infer(engine, num_tools=2)
     template.template_backend = 'jinja'
     messages2 = _infer(engine, num_tools=2)
@@ -228,36 +228,36 @@ def test_hermes():
     encoded2 = template.encode(data)
     print(f'input_ids: {template.safe_decode(encoded2["input_ids"])}')
     print(f'labels: {template.safe_decode(encoded2["labels"])}')
-    assert encoded['input_ids'] == encoded2['input_ids'][:-1]
+    assert encoded['input_ids'] == encoded2['input_ids']
 
 
 def test_toolbench():
-    agent_template = agent_templates['toolbench']()
+    agent_template = agent_template_map['toolbench']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 1833
-    engine = PtEngine('Qwen/Qwen2.5-7B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen2.5-7B-Instruct')
+    template = engine.template
+    template._agent_template = 'toolbench'
     _infer(engine)
 
 
-def test_glm4():
-    agent_template = agent_templates['glm4']()
+def test_chatglm4():
+    agent_template = agent_template_map['chatglm4']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 846
-    engine = PtEngine('ZhipuAI/glm-4-9b-chat')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('ZhipuAI/glm-4-9b-chat')
+    template = engine.template
+    template._agent_template = 'chatglm4'
     _infer(engine, agent_tools=glm4_tools, tool_messages=glm4_tool_messasges, query=glm4_query)
 
 
-def test_glm4_0414():
-    agent_template = agent_templates['glm4_0414']()
+def test_glm4():
+    agent_template = agent_template_map['glm4']()
     new_system = agent_template._format_tools(tools, system)
     assert len(new_system) == 769
-    engine = PtEngine('ZhipuAI/GLM-4-9B-0414')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('ZhipuAI/GLM-4-9B-0414')
+    template = engine.template
+    template._agent_template = 'glm4'
     messages = _infer(engine, agent_tools=glm4_tools, tool_messages=glm4_tool_messasges, query=glm4_query)
     assert messages[-1]['content'] == '根据天气预报工具，北京今天的空气质量指数为10，属于良好水平；上海今天的空气质量指数为72，属于轻度污染水平。'
     template.set_mode('train')
@@ -276,10 +276,9 @@ def test_glm4_0414():
 
 
 def test_llama3():
-    agent_template = agent_templates['llama3']()
-    engine = PtEngine('LLM-Research/Llama-3.2-3B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('LLM-Research/Llama-3.2-3B-Instruct')
+    template = engine.template
+    template._agent_template = 'llama3'
     messages = _infer(engine)
 
     template.set_mode('train')
@@ -298,10 +297,8 @@ def test_llama3():
 
 
 def test_llama4():
-    agent_template = agent_templates['llama4']()
-    engine = PtEngine('LLM-Research/Llama-4-Scout-17B-16E-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('LLM-Research/Llama-4-Scout-17B-16E-Instruct')
+    template = engine.template
     messages = _infer(engine)
     template.set_mode('train')
     encoded = template.encode({'messages': messages})
@@ -310,8 +307,8 @@ def test_llama4():
 
 
 def test_hunyuan():
-    engine = PtEngine('Tencent-Hunyuan/Hunyuan-1.8B-Instruct')
-    template = engine.default_template
+    engine = TransformersEngine('Tencent-Hunyuan/Hunyuan-1.8B-Instruct')
+    template = engine.template
     template.template_backend = 'jinja'
     _infer(engine, num_tools=2)
 
@@ -332,8 +329,8 @@ def test_hunyuan():
 
 
 def test_glm4_5():
-    engine = PtEngine('ZhipuAI/GLM-4.5-Air')
-    template = engine.default_template
+    engine = TransformersEngine('ZhipuAI/GLM-4.5-Air')
+    template = engine.template
     template.template_backend = 'jinja'
     _infer(engine, num_tools=2)
 
@@ -353,11 +350,29 @@ def test_glm4_5():
     assert encoded['input_ids'][:-1] == encoded2['input_ids']
 
 
+def test_glm4_7():
+    engine = TransformersEngine('ZhipuAI/GLM-4.7-FP8', load_model=False)
+    template = engine.template
+
+    dataset = load_dataset('AI-ModelScope/function-calling-chatml')[0]
+    data = dataset[6]
+    data['messages'].insert(1, data['messages'][1])
+    data['messages'].insert(3, data['messages'][3])
+    template.template_backend = 'swift'
+    template.set_mode('train')
+    encoded = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded["labels"])}')
+    template.template_backend = 'jinja'
+    encoded2 = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded2["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded2["labels"])}')
+    assert encoded['input_ids'][:-1] == encoded2['input_ids']
+
+
 def test_qwen3_coder():
-    agent_template = agent_templates['qwen3_coder']()
-    engine = PtEngine('Qwen/Qwen3-Coder-30B-A3B-Instruct')
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('Qwen/Qwen3-Coder-30B-A3B-Instruct')
+    template = engine.template
     template.template_backend = 'jinja'
     _infer(engine, num_tools=2)
 
@@ -374,15 +389,35 @@ def test_qwen3_coder():
     encoded2 = template.encode(data)
     print(f'input_ids: {template.safe_decode(encoded2["input_ids"])}')
     print(f'labels: {template.safe_decode(encoded2["labels"])}')
-    assert encoded['input_ids'] == encoded2['input_ids'][:-1]
+    assert encoded['input_ids'] == encoded2['input_ids']
+
+
+def test_qwen3_5():
+    engine = TransformersEngine('Qwen/Qwen3.5-35B-A3B')
+    template = engine.template
+    template.template_backend = 'jinja'
+    _infer(engine, num_tools=2)
+
+    dataset = load_dataset('AI-ModelScope/function-calling-chatml')[0]
+    data = dataset[6]
+    data['messages'].insert(1, data['messages'][1])
+    data['messages'].insert(3, data['messages'][3])
+    data['messages'].insert(0, {'role': 'system', 'content': 'You are a helpful assistant.'})
+    template.template_backend = 'swift'
+    template.set_mode('train')
+    encoded = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded["labels"])}')
+    template.template_backend = 'jinja'
+    encoded2 = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded2["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded2["labels"])}')
+    assert encoded['input_ids'] == encoded2['input_ids']
 
 
 def test_deepseek_v3_1():
-    agent_template = agent_templates['deepseek_v3_1']()
-
-    engine = PtEngine('deepseek-ai/DeepSeek-V3.1', load_model=False, download_model=False)
-    template = engine.default_template
-    template.agent_template = agent_template
+    engine = TransformersEngine('deepseek-ai/DeepSeek-V3.1', load_model=False)
+    template = engine.template
 
     dataset = load_dataset('AI-ModelScope/function-calling-chatml')[0]
     data = dataset[6]
@@ -442,14 +477,199 @@ def test_deepseek_v3_1():
     assert encoded['input_ids'][-122:] == encoded2['input_ids'][1:]
 
 
+def test_youtu():
+    agent_template = agent_template_map['youtu']()
+    new_system = agent_template._format_tools(tools, system)
+    assert len(new_system) == 883
+    engine = TransformersEngine('Tencent-YouTu-Research/Youtu-LLM-2B')
+    template = engine.template
+    template._agent_template = 'youtu'
+
+    stop = [template.agent_template.keyword.observation]
+    query = "How's the weather in Beijing today?"
+    tool_messages = [{'role': 'tool', 'content': '{"temperature": 32, "condition": "Sunny", "humidity": 50}'}]
+    infer_request = InferRequest([{'role': 'user', 'content': query}], tools=tools)
+    request_config = RequestConfig(max_tokens=2048, stop=stop, temperature=0)
+
+    # First inference: get tool call
+    resp_list = engine.infer([infer_request], request_config=request_config)
+    response = resp_list[0].choices[0].message.content
+    toolcall = resp_list[0].choices[0].message.tool_calls
+    print(f'response: {response}')
+    print(f'toolcall: {toolcall}')
+    assert toolcall is not None, 'No tool_call generated'
+    infer_request.messages.append({'role': 'assistant', 'content': response})
+    infer_request.messages += tool_messages
+
+    # Second inference: get final response
+    resp_list = engine.infer([infer_request], request_config=request_config)
+    response2 = resp_list[0].choices[0].message.content
+    print(f'response2: {response2}')
+    infer_request.messages.append({'role': 'assistant', 'content': response2})
+    messages = infer_request.messages
+
+    template.set_mode('train')
+    encoded = template.encode({'messages': messages})
+    print(f'input_ids: {template.safe_decode(encoded["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded["labels"])}')
+
+    dataset = load_dataset('AI-ModelScope/function-calling-chatml')[0]
+    data = dataset[6]
+    data['messages'].insert(1, data['messages'][1])
+    data['messages'].insert(3, data['messages'][3])
+    template.template_backend = 'swift'
+    encoded = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded["labels"])}')
+    template.template_backend = 'jinja'
+    encoded2 = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded2["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded2["labels"])}')
+    assert encoded['input_ids'] == encoded2['input_ids']
+
+
+def test_deepseek_v4():
+    engine = TransformersEngine('deepseek-ai/DeepSeek-V4-Flash', load_model=False)
+    template = engine.template
+
+    tools = [{
+        'type': 'function',
+        'function': {
+            'name': 'get_weather',
+            'description': 'Get the weather for a specific location',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'location': {
+                        'type': 'string',
+                        'description': 'The city name'
+                    },
+                    'unit': {
+                        'type': 'string',
+                        'enum': ['celsius', 'fahrenheit'],
+                        'description': 'Temperature unit'
+                    }
+                },
+                'required': ['location']
+            }
+        }
+    }, {
+        'type': 'function',
+        'function': {
+            'name': 'search',
+            'description': 'Search the web for information',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'query': {
+                        'type': 'string',
+                        'description': 'Search query'
+                    },
+                    'num_results': {
+                        'type': 'integer',
+                        'description': 'Number of results to return'
+                    }
+                },
+                'required': ['query']
+            }
+        }
+    }]
+    data = {
+        'tools':
+        tools,
+        'messages': [
+            {
+                'role': 'system',
+                'content': 'You are a helpful assistant.'
+            },
+            {
+                'role': 'user',
+                'content': "What's the weather in Beijing?"
+            },
+            {
+                'role':
+                'assistant',
+                # The `\n\n` before the tool_calls block is added by the template
+                # (`DeepSeekV4AgentTemplate._add_tool_call_prefix`), not by the data.
+                'content':
+                '<think>The user wants to know the weather in Beijing. I should use the get_weather tool.</think>'
+            },
+            {
+                'role':
+                'tool_call',
+                'content':
+                '{"name": "get_weather", "arguments": "{\\"location\\": \\"Beijing\\", \\"unit\\": \\"celsius\\"}"}'
+            },
+            {
+                'role': 'tool_response',
+                'content': '{"temperature": 22, "condition": "sunny", "humidity": 45}'
+            },
+            {
+                'role':
+                'assistant',
+                'content': ('<think>Got the weather data. Let me format a nice response.</think>'
+                            'The weather in Beijing is currently sunny with a temperature of 22°C and 45% humidity.')
+            }
+        ]
+    }
+
+    template.template_backend = 'swift'
+    template.set_mode('train')
+    encoded = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded["labels"])}')
+
+    expected_input_ids = (
+        '<｜begin▁of▁sentence｜>You are a helpful assistant.\n\n## Tools\n\n'
+        'You have access to a set of tools to help answer the user\'s question. '
+        'You can invoke tools by writing a "<｜DSML｜tool_calls>" block like the following:\n\n'
+        '<｜DSML｜tool_calls>\n'
+        '<｜DSML｜invoke name="$TOOL_NAME">\n'
+        '<｜DSML｜parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</｜DSML｜parameter>\n'
+        '...\n'
+        '</｜DSML｜invoke>\n'
+        '<｜DSML｜invoke name="$TOOL_NAME2">\n'
+        '...\n'
+        '</｜DSML｜invoke>\n'
+        '</｜DSML｜tool_calls>\n\n'
+        'String parameters should be specified as is and set `string="true"`. '
+        'For all other types (numbers, booleans, arrays, objects), '
+        'pass the value in JSON format and set `string="false"`.\n\n'
+        'If thinking_mode is enabled (triggered by <think>), '
+        'you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.'
+        '\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n'
+        '### Available Tool Schemas\n\n'
+        '{"name": "get_weather", "description": "Get the weather for a specific location", '
+        '"parameters": {"type": "object", "properties": {"location": {"type": "string", '
+        '"description": "The city name"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], '
+        '"description": "Temperature unit"}}, "required": ["location"]}}\n'
+        '{"name": "search", "description": "Search the web for information", '
+        '"parameters": {"type": "object", "properties": {"query": {"type": "string", '
+        '"description": "Search query"}, "num_results": {"type": "integer", '
+        '"description": "Number of results to return"}}, "required": ["query"]}}\n\n'
+        'You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n'
+        '<｜User｜>What\'s the weather in Beijing?<｜Assistant｜>'
+        '<think>The user wants to know the weather in Beijing. I should use the get_weather tool.</think>\n\n'
+        '<｜DSML｜tool_calls>\n'
+        '<｜DSML｜invoke name="get_weather">\n'
+        '<｜DSML｜parameter name="location" string="true">Beijing</｜DSML｜parameter>\n'
+        '<｜DSML｜parameter name="unit" string="true">celsius</｜DSML｜parameter>\n'
+        '</｜DSML｜invoke>\n'
+        '</｜DSML｜tool_calls>'
+        '<｜end▁of▁sentence｜>'
+        '<｜User｜><tool_result>{"temperature": 22, "condition": "sunny", "humidity": 45}</tool_result>'
+        '<｜Assistant｜>'
+        '<think>Got the weather data. Let me format a nice response.</think>'
+        'The weather in Beijing is currently sunny with a temperature of 22°C and 45% humidity.'
+        '<｜end▁of▁sentence｜>')
+
+    assert template.safe_decode(encoded['input_ids']) == expected_input_ids
+
+
 def test_seed_oss():
-    agent_template = agent_templates['seed_oss']()
+    engine = TransformersEngine('ByteDance-Seed/Seed-OSS-36B-Instruct', load_model=False)
 
-    engine = PtEngine('ByteDance-Seed/Seed-OSS-36B-Instruct', load_model=False, download_model=False)
-
-    template = engine.default_template
-    template.agent_template = agent_template
-
+    template = engine.template
     dataset = load_dataset('AI-ModelScope/function-calling-chatml')[0]
     data = dataset[6]
     # To test multiple tool calls and responses, we duplicate some messages.
@@ -511,9 +731,182 @@ def test_seed_oss():
     assert template.safe_decode(encoded2['input_ids']) == expected_input_ids
 
 
+def test_standalone_tool():
+    # https://github.com/modelscope/ms-swift/issues/9843
+    # A 'tool' message without a preceding assistant tool_call, plus an assistant
+    # message that only carries `tool_calls` (no 'content' key).
+    engine = TransformersEngine('Qwen/Qwen3-8B', load_model=False)
+    template = engine.template
+    template.add_non_thinking_prefix = False
+
+    aqi_tools = [{
+        'type': 'function',
+        'function': {
+            'name': 'realtime_aqi',
+            'description': '天气预报。获取实时空气质量。',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'city': {
+                        'type': 'string',
+                        'description': '城市名'
+                    }
+                },
+                'required': ['city']
+            }
+        }
+    }]
+    data = {
+        'tools':
+        aqi_tools,
+        'messages': [
+            {
+                'role': 'user',
+                'content': '上海今天的天气情况'
+            },
+            # A standalone observation: no assistant tool_call precedes it.
+            {
+                'role': 'tool',
+                'content': '这是一个环境信息'
+            },
+            # OpenAI-style tool_calls without the 'content' key.
+            {
+                'role': 'assistant',
+                'tool_calls': [{
+                    'type': 'function',
+                    'function': {
+                        'name': 'realtime_aqi',
+                        'arguments': {
+                            'city': '上海'
+                        }
+                    }
+                }]
+            },
+            {
+                'role': 'tool',
+                'name': 'realtime_aqi',
+                'content': '{"city": "上海", "aqi": "72", "unit": "fahrenheit"}'
+            },
+            {
+                'role': 'assistant',
+                'content': '上海AQI为72，轻度污染。'
+            },
+        ]
+    }
+
+    template.template_backend = 'swift'
+    template.set_mode('train')
+    encoded = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded["labels"])}')
+
+    template.template_backend = 'jinja'
+    encoded2 = template.encode(data)
+
+    def _normalize(text):
+        # Pre-existing swift/jinja differences unrelated to tool messages: the swift
+        # backend keeps the blank lines of an empty system, and the jinja template
+        # always injects an empty thinking block.
+        return text.replace('<|im_start|>system\n\n\n', '<|im_start|>system\n',
+                            1).replace('<think>\n\n</think>\n\n', '')
+
+    # A regular tool call round already matches between both backends; use it to prove
+    # `_normalize` does not paper over a real mismatch.
+    baseline = {'tools': aqi_tools, 'messages': data['messages'][:1] + data['messages'][2:]}
+    template.template_backend = 'swift'
+    baseline_swift = template.encode(baseline)
+    template.template_backend = 'jinja'
+    baseline_jinja = template.encode(baseline)
+    assert _normalize(template.safe_decode(baseline_swift['input_ids'])) == _normalize(
+        template.safe_decode(baseline_jinja['input_ids']))
+
+    # The standalone tool message must be rendered exactly like the model's own
+    # chat template renders it.
+    assert _normalize(template.safe_decode(encoded['input_ids'])) == _normalize(
+        template.safe_decode(encoded2['input_ids']))
+
+    # A standalone tool message must follow a user message.
+    template.template_backend = 'swift'
+    for messages in [
+        [{
+            'role': 'tool',
+            'content': 'env'
+        }, {
+            'role': 'assistant',
+            'content': 'ok'
+        }],
+        [{
+            'role': 'system',
+            'content': 'You are a helpful assistant.'
+        }, {
+            'role': 'tool',
+            'content': 'env'
+        }, {
+            'role': 'assistant',
+            'content': 'ok'
+        }],
+    ]:
+        try:
+            template.encode({'messages': messages})
+            raise AssertionError(f'Expected ValueError. messages: {messages}')
+        except ValueError:
+            pass
+
+    # An `assistant` + `tool` pair is a normal tool call round, not a standalone one.
+    pair_data = {
+        'tools':
+        aqi_tools,
+        'messages': [{
+            'role': 'user',
+            'content': 'q'
+        }, {
+            'role': 'assistant',
+            'content': '<tool_call>\n{"name": "realtime_aqi", "arguments": {"city": "上海"}}\n</tool_call>'
+        }, {
+            'role': 'tool',
+            'content': 'r'
+        }, {
+            'role': 'assistant',
+            'content': 'a'
+        }]
+    }
+    template.template_backend = 'swift'
+    pair_swift = template.encode(pair_data)
+    template.template_backend = 'jinja'
+    pair_jinja = template.encode(pair_data)
+    assert _normalize(template.safe_decode(pair_swift['input_ids'])) == _normalize(
+        template.safe_decode(pair_jinja['input_ids']))
+
+
+def test_ling3():
+    engine = TransformersEngine('inclusionAI/Ling-3.0-flash', load_model=False)
+    template = engine.template
+    template.template_backend = 'jinja'
+
+    dataset = load_dataset('AI-ModelScope/function-calling-chatml')[0]
+    data = dataset[6]
+    data['messages'].insert(1, data['messages'][1])
+    data['messages'].insert(3, data['messages'][3])
+    template.template_backend = 'swift'
+    template.set_mode('train')
+    encoded = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded["labels"])}')
+    template.template_backend = 'jinja'
+    encoded2 = template.encode(data)
+    print(f'input_ids: {template.safe_decode(encoded2["input_ids"])}')
+    print(f'labels: {template.safe_decode(encoded2["labels"])}')
+
+    def _normalize(text):
+        return text.replace('\n', '')
+
+    assert _normalize(template.safe_decode(encoded['input_ids'])) == _normalize(
+        template.safe_decode(encoded2['input_ids']))
+
+
 if __name__ == '__main__':
-    from swift.plugin import agent_templates
-    from swift.llm import PtEngine, InferRequest, RequestConfig, load_dataset
+    from swift import InferRequest, RequestConfig, TransformersEngine, agent_template_map, load_dataset
+
     # test_react_en()
     # test_react_zh()
     # test_qwen_en()
@@ -522,12 +915,18 @@ if __name__ == '__main__':
     # test_qwen_zh_parallel()
     # test_hermes()
     # test_toolbench()
+    # test_chatglm4()
     # test_glm4()
-    # test_glm4_0414()
     # test_llama3()
     # test_llama4()
     # test_hunyuan()
     # test_glm4_5()
+    # test_glm4_7()
     # test_qwen3_coder()
+    # test_qwen3_5()
     # test_deepseek_v3_1()
-    test_seed_oss()
+    # test_deepseek_v4()
+    # test_seed_oss()
+    # test_youtu()
+    # test_ling3()
+    test_standalone_tool()

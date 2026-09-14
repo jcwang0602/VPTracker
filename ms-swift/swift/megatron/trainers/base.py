@@ -1,241 +1,354 @@
-# Copyright (c) Alibaba, Inc. and its affiliates.
-import collections
+# Copyright (c) ModelScope Contributors. All rights reserved.
+import dataclasses
+import logging
+import megatron.core
+import operator
 import os
 import shutil
-import time
-from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from datetime import datetime
-from typing import Callable, Dict, List, Literal, Optional
-
-import megatron.core
 import torch
 import torch.nn
+from abc import ABC, abstractmethod
+from contextlib import contextmanager, nullcontext
+from functools import partial
+from mcore_bridge import LoraParallelLinear
 from megatron.core import mpu
-from megatron.core.enums import ModelType
-from megatron.core.num_microbatches_calculator import get_num_microbatches
-from megatron.core.optimizer import _update_min_and_max_lr_in_param_groups, param_group_identifier_keys
+from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.distributed import FullyShardedDataParallel as megatron_FSDP
+from megatron.core.distributed import finalize_model_grads
+from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron.core.rerun_state_machine import RerunMode, get_rerun_state_machine
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
-from megatron.core.utils import StragglerDetector
-from megatron.training import (checkpointing, ft_integration, get_args, get_model, get_tensorboard_writer, get_timers,
-                               get_wandb_writer, is_last_rank, one_logger_utils, pretrain, print_rank_0,
-                               print_rank_last, training)
-from megatron.training.checkpointing import load_checkpoint
-from megatron.training.theoretical_memory_usage import report_theoretical_memory
-from megatron.training.training import num_floating_point_operations
-from megatron.training.utils import reduce_max_stat_across_model_parallel_group, report_memory, unwrap_model
+from modelscope import check_local_model_is_latest
 from packaging import version
-from tqdm.auto import tqdm
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
-from swift.llm import dynamic_gradient_checkpointing
-from swift.plugin import MeanMetric
-from swift.trainers import SwiftMixin
-from swift.utils import JsonlWriter, deep_getattr, format_time, get_logger
-from ..tuners import LoraParallelLinear
-from ..utils import adapter_state_dict_context, copy_original_module_weight, patch_merge_fn, prepare_mcore_model
-from .utils import (get_batch_on_this_cp_rank, get_batch_on_this_tp_rank, get_packed_seq_params,
-                    get_swift_datasets_provider)
+from swift.dataset import RowPreprocessor
+from swift.megatron.callbacks import megatron_callbacks_map
+from swift.megatron.model import get_mcore_model
+from swift.megatron.utils import (apply_router_replay_patch, disable_forward_pre_hook, enable_forward_pre_hook,
+                                  get_optimizer_param_scheduler, get_padding_to, init_persistent_async_worker,
+                                  initialize_tp_communicators, load_mcore_checkpoint,
+                                  logical_and_across_model_parallel_group, maybe_finalize_async_save,
+                                  prepare_mcore_model, reconstruct_tensor_cp,
+                                  reduce_max_stat_across_model_parallel_group, save_mcore_checkpoint,
+                                  should_disable_forward_pre_hook, warmup_jit_function, wrap_model)
+from swift.template import Template
+from swift.trainers import dynamic_gradient_checkpointing
+from swift.trainers.utils import patch_modelscope_hub_timeout
+from swift.utils import (deep_getattr, gc_collect, get_current_device, get_last_valid_indices, get_logger, is_last_rank,
+                         is_master, ms_logger_context, update_last_checkpoint_symlink)
+from .batch_sampler import MegatronPretrainingRandomSampler, MegatronPretrainingSampler
+from .utils import TrainerState, build_streaming_dataloader, prepare_batch
+
+try:
+    from megatron.core.optimizer import param_group_identifier_keys
+    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+except ImportError:
+    param_group_identifier_keys = None
+    RouterReplay = None
+    RouterReplayAction = None
+
+mcore_016 = version.parse(megatron.core.__version__) >= version.parse('0.16.0rc0')
+
+try:
+    from megatron.core.optimizer.layer_wise_optimizer import is_managed_by_layer_wise_optimizer
+except ImportError:
+    # Before the layer-wise optimizer there was no shared predicate: `get_megatron_muon_optimizer` split the
+    # parameters between Muon and the scalar optimizer inline with this very rule, so mirror it to stay in step.
+    def is_managed_by_layer_wise_optimizer(param) -> bool:
+        return not getattr(param, 'is_embedding_or_output_parameter', False) and param.dim() == 2
+
 
 logger = get_logger()
 
 
 class BaseMegatronTrainer(ABC):
 
-    def __init__(self, args, template):
+    def __init__(self, args, template: Template):
+        # validate mcore version and patch routing_replay
+        self.enable_routing_replay = args.router_replay_mode != 'disabled'
+        if self.enable_routing_replay:
+            apply_router_replay_patch()
+
         self.args = args
         self.template = template
-        self.stimer = StragglerDetector()
-        self.unwrapped_models = []
-        self.peft_models = []
-        self._bridge = None
-        logging_path = os.path.join(args.save, 'logging.jsonl')
-        logger.info(f'logging_path: {logging_path}')
-        self.jsonl_writer = JsonlWriter(logging_path, enable_async=True, write_on_rank='last')  # for evaluate
-        self._patch_megatron()
+        self.prepare_model()
+        # Sync template.padding_free after prepare_model(), because _check_padding_free
+        # may override args.padding_free for certain models (e.g. DSA attention).
+        if template.padding_free != args.padding_free:
+            logger.warning(f'template.padding_free({template.padding_free}) != args.padding_free({args.padding_free}), '
+                           f'syncing template.padding_free to {args.padding_free}.')
+            template.padding_free = args.padding_free
+        self.optimizer, self.opt_param_scheduler = self.get_optimizer_and_scheduler()
+        self.data_collator = self._get_data_collator()
 
-        def _get_mean_metric():
-            return MeanMetric(nan_value=None, group=mpu.get_data_parallel_group(with_context_parallel=True))
+        self.state = TrainerState(max_steps=args.train_iters)
+        initialize_embedding = args.new_special_tokens or args.task_type == 'seq_cls'
+        if initialize_embedding:
+            for m in self.unwrapped_models:
+                self._initialize_embedding(m)
+        if args.tp_comm_overlap:
+            initialize_tp_communicators(args, self.config)
+        warmup_jit_function(self.config, args)
+        self._load_checkpoint()
 
-        self.custom_metrics = {
-            'train': collections.defaultdict(_get_mean_metric),
-            'eval': collections.defaultdict(_get_mean_metric)
-        }
-        self.megatron_core_013 = version.parse(megatron.core.__version__) >= version.parse('0.13.0rc0')
+        self.eval_metrics = None
+        if args.check_model and hasattr(args, 'model_dir'):
+            with ms_logger_context(logging.CRITICAL), patch_modelscope_hub_timeout():
+                config_info = self._collect_config_info()
+                config_info.update({
+                    'invoked_by': 'local_trainer',
+                    'third_party': 'swift',
+                    'trainer_class': self.__class__.__name__,
+                    'trainer_backend': 'megatron',
+                })
+                check_local_model_is_latest(args.model_info.model_dir, user_agent=config_info)
 
-    @property
-    def bridge(self):
-        if self._bridge is None:
-            self._bridge = self.args.megatron_model_meta.bridge_cls()
-        return self._bridge
+        self.callbacks = []
+        for callback in args.callbacks:
+            self.callbacks.append(megatron_callbacks_map[callback](self))
 
-    @contextmanager
-    def _get_iters(self, train_dataset, val_dataset):
-        origin_initialize_megatron = training.initialize_megatron
+        if args.async_save and args.use_persistent_ckpt_worker:
+            init_persistent_async_worker()
 
-        def initialize_megatron(*_args, **kwargs):
-            res = origin_initialize_megatron(*_args, **kwargs)
-            args = get_args()
-            data_parallel_size = mpu.get_data_parallel_world_size()
-            step_batch_size = args.micro_batch_size * data_parallel_size
-            if args.train_iters is None and args.max_epochs is not None:
-                if hasattr(train_dataset, '__len__'):
-                    dataset_sample = len(train_dataset) // step_batch_size * step_batch_size
-                    args.train_iters = dataset_sample * args.max_epochs // args.global_batch_size
-                else:
-                    raise ValueError(
-                        'You are using a streaming training dataset. Please explicitly specify `--train_iters`.')
-            if args.eval_iters < 0:
-                if val_dataset is None:
-                    args.eval_iters = 0
-                elif hasattr(val_dataset, '__len__'):
-                    dataset_sample = len(val_dataset) // step_batch_size * step_batch_size
-                    args.eval_iters = max(dataset_sample // args.global_batch_size, 1)
-                else:
-                    raise ValueError(
-                        'You are using a streaming validation dataset. Please explicitly specify `--eval_iters`.')
-                logger.info(f'Setting args.eval_iters: {args.eval_iters}')
-            return res
+    def _load_checkpoint(self):
+        args = self.args
+        if not args.finetune:
+            self.state.iteration = self._load_iteration()
+        if args.mcore_model is not None:
+            self.state.iteration = load_mcore_checkpoint(
+                args, self.wrapped_models, self.optimizer, self.opt_param_scheduler, load_arg='mcore_model')
+        if args.mcore_adapter is not None:
+            self.state.iteration = load_mcore_checkpoint(
+                args, self.wrapped_models, self.optimizer, self.opt_param_scheduler, load_arg='mcore_adapter')
+        self.state.consumed_train_samples = getattr(args, 'consumed_train_samples', 0)
 
-        training.initialize_megatron = initialize_megatron
-        try:
-            yield
-        finally:
-            training.initialize_megatron = origin_initialize_megatron
+    def call_event(self, event, **kwargs):
+        for callback in self.callbacks:
+            getattr(callback, event)(**kwargs)
 
-    def new_cyclic_iter(self, iterable):
-        args = get_args()
-        i = 0
-        n_batch = 0
-        while True:
-            training = self.unwrapped_models[0].training
-            if training:
-                logger.info(f'The training of Epoch {i} starts...')
-            if training and args.max_epochs and i >= args.max_epochs - 1:
-                it = iter(iterable)
-                num_microbatches = args.global_batch_size // (args.micro_batch_size * args.data_parallel_size)
-                x = [next(it) for _ in range(num_microbatches - n_batch % num_microbatches)]
-                while True:
-                    try:
-                        next_x = [next(it) for _ in range(num_microbatches)]
-                    except StopIteration:
-                        break
-                    yield from x
-                    x = next_x
-                logger.info(f'Training of {i + 1} epochs has been completed, the training has finished.')
-                x[0]['is_finished'] = True
-                yield from x
+    def on_log(self, logs, prefix=''):
+        n_steps = logs.pop('n_steps')
+        self._log_callback(logs, n_steps)
+        if prefix:
+            logs = {f'{prefix}{k}': v for k, v in logs.items()}
+        self._last_logged_metrics = dict(logs)
+        self.call_event('on_log', logs=logs)
+
+    def _log_callback(self, logs, n_steps):
+        args = self.args
+        config = self.config
+        if config.num_moe_experts is not None:
+            moe_loss_scale = 1 / args.num_microbatches / n_steps
+            track_names = []
+            load_balancing_type = config.moe_router_load_balancing_type
+            if isinstance(load_balancing_type, str):
+                load_balancing_type = [load_balancing_type]
+            if 'aux_loss' in load_balancing_type:
+                track_names.append('load_balancing_loss')
+            if 'seq_aux_loss' in load_balancing_type:
+                track_names.append('seq_load_balancing_loss')
+            if 'global_aux_loss' in load_balancing_type:
+                track_names.append('global_load_balancing_loss')
+            if config.moe_z_loss_coeff is not None:
+                track_names.append('z_loss')
+            track_moe_metrics(
+                loss_scale=moe_loss_scale,
+                iteration=self.state.iteration,
+                writer=None,
+                total_loss_dict=logs,
+                force_initialize=True,
+                track_names=track_names,
+                num_layers=config.num_layers,
+                moe_layer_freq=config.moe_layer_freq,
+                mtp_num_layers=args.mtp_num_layers)
+        if args.mtp_num_layers is not None:
+            mtp_loss_scale = 1 / args.num_microbatches / n_steps
+            mtp_logs = {}
+            MTPLossLoggingHelper.track_mtp_metrics(mtp_loss_scale, self.state.iteration, None, None, mtp_logs)
+            logs.update({k.replace(' ', '_'): v for k, v in mtp_logs.items()})
+        # Track sparse attention indexer loss.
+        if args.dsa_indexer_loss_coeff is not None and args.dsa_indexer_loss_coeff > 0:
+            from megatron.core.transformer.experimental_attention_variant.dsa import DSAIndexerLossLoggingHelper
+            indexer_loss_scale = 1 / args.num_microbatches / n_steps
+            idx_logs = {}
+            DSAIndexerLossLoggingHelper.track_indexer_metrics(
+                loss_scale=indexer_loss_scale,
+                iteration=self.state.iteration,
+                writer=None,
+                wandb_writer=None,
+                total_loss_dict=idx_logs,
+            )
+            logs.update({k.replace(' ', '_'): v for k, v in idx_logs.items()})
+
+        for k, v in logs.items():
+            if isinstance(v, torch.Tensor):
+                if v.numel() == 2:
+                    v = v[0] / v[1]
+                v = v.item()
+            logs[k] = v
+
+    def prepare_model(self):
+        args = self.args
+        self.unwrapped_models = get_mcore_model(args, self.template.config)
+        self.config = self.unwrapped_models[0].config
+        logger.info(f'model_config: {self.config}')
+        self.bridge = self.config.bridge
+        self.peft_models = self._prepare_peft_model(self.unwrapped_models)
+        self.wrapped_models = wrap_model(args, self.unwrapped_models)
+
+    def _prepare_peft_model(self, models):
+        args = self.args
+        if args.mcore_model is None:
+            self.bridge.load_weights(models, args.model_dir)
+        peft_models = [prepare_mcore_model(args, model) for model in models]
+        if args.tuner_type in {'lora', 'lora_llm'} and args.adapters and args.mcore_adapter is None:
+            assert len(args.adapters) == 1, 'Currently only support one adapter.'
+            self.bridge.load_weights(models, args.adapters[0], peft_format=True, adapter_name='default')
+        return peft_models
+
+    def get_optimizer_and_scheduler(self):
+        args = self.args
+        if mcore_016:
+            from megatron.core.optimizer import AdamOptimizerConfig, SGDOptimizerConfig
+            if args.optimizer == 'adam' or 'muon' in args.optimizer:
+                # TODO(deyuf): Muon needs both adam + muon but get() only receive one config
+                # So for now we keep using adam config that's back compat with old way
+                config_cls = AdamOptimizerConfig
+            elif args.optimizer == 'sgd':
+                config_cls = SGDOptimizerConfig
             else:
+                raise ValueError(f'Invalid optimizer type: {args.optimizer}')
+        else:
+            config_cls = OptimizerConfig
+
+        kwargs = {
+            f.name: getattr(args, f.name)
+            for f in dataclasses.fields(config_cls) if hasattr(args, f.name) and f.name != 'loss_scale'
+        }
+        config = config_cls(**kwargs)
+
+        if self._needs_own_param_groups(args, config):
+            param_groups_context = self._patch_get_param_groups()
+        else:
+            param_groups_context = nullcontext()
+        with param_groups_context:
+
+            if 'muon' not in config.optimizer:
+                # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
+                # to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
+                # default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
+                optimizer = get_megatron_optimizer(
+                    config,
+                    self.wrapped_models,
+                )
+            else:
+                from megatron.core.optimizer.muon import get_megatron_muon_optimizer
+                optimizer = get_megatron_muon_optimizer(
+                    config,
+                    self.wrapped_models,
+                    layer_wise_distributed_optimizer='dist' in config.optimizer,
+                    **self._get_muon_config_overrides(config),
+                )
+        opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
+        return optimizer, opt_param_scheduler
+
+    @staticmethod
+    def _needs_own_param_groups(args, config) -> bool:
+        """Whether swift has to build the parameter groups itself instead of letting mcore do it.
+
+        `vit_lr`/`aligner_lr` have no mcore equivalent, so they leave no choice. That replacement drops the
+        `config_overrides` Muon routes its parameters with, so under Muon `apply_wd_to_qk_layernorm` is left
+        to mcore, which implements it in `get_standard_config_overrides` -- but only on the versions that
+        have it, and `config` carries the field exactly when mcore declares it.
+        """
+        if args.vit_lr is not None or args.aligner_lr is not None:
+            return True
+        if not args.apply_wd_to_qk_layernorm:
+            return False
+        return not ('muon' in config.optimizer and hasattr(config, 'apply_wd_to_qk_layernorm'))
+
+    def _get_muon_config_overrides(self, config) -> Dict[str, Any]:
+        """Give the matrices Muon manages a learning rate of their own.
+
+        Muon orthogonalizes its updates, so those matrices usually want a different learning rate from the
+        scalar optimizer that handles the remaining parameters. mcore expresses this with the same override
+        mechanism it already uses to split the parameters between the two optimizers, keyed on the very
+        predicate that decides the split, so the override cannot drift away from the actual grouping.
+        """
+        args = self.args
+        if args.muon_lr is None and args.muon_min_lr is None:
+            return {}
+        from megatron.core.optimizer import ParamKey, ParamPredicate, get_standard_config_overrides
+
+        override = {}
+        if args.muon_lr is not None:
+            override['max_lr'] = args.muon_lr
+        if args.muon_min_lr is not None:
+            override['min_lr'] = args.muon_min_lr
+        logger.info(f'muon_lr: {args.muon_lr}, muon_min_lr: {args.muon_min_lr}, '
+                    f'{args.muon_scalar_optimizer}_lr: {args.lr}, {args.muon_scalar_optimizer}_min_lr: {args.min_lr}')
+        param_key = ParamKey(
+            predicate=ParamPredicate(name='muon_managed_matrix', fn=is_managed_by_layer_wise_optimizer))
+        # mcore only falls back to its standard overrides (the weight-decay skips and `decoupled_lr`) when the
+        # caller passes none of its own, so extend them rather than replace them.
+        config_overrides = get_standard_config_overrides(config)
+        config_overrides[param_key] = override
+        return {'config_overrides': config_overrides}
+
+    def _get_data_collator(self):
+        data_collator = self.template.data_collator
+        padding_to = get_padding_to(self.args)
+        logger.info(f'padding_to: {padding_to}')
+        data_collator = partial(data_collator, padding_to=padding_to)
+        return data_collator
+
+    def cyclic_iter(self, iterable, use_origin_cyclic: bool = False):
+        training = self.unwrapped_models[0].training
+        if not training or use_origin_cyclic:
+            while True:
                 for x in iterable:
-                    n_batch += 1
                     yield x
-            i += 1
+            return
 
-    def _replace_data_iterator(self, data_iterator, model):
-        return data_iterator
+        args = self.args
+        epoch = 0
+        is_finished = False
+        while True:
+            if not is_finished:
+                logger.info(f'The training of Epoch {epoch} starts...')
+            if hasattr(iterable, 'set_epoch'):
+                iterable.set_epoch(epoch)
+            for x in iterable:
+                yield x
+            # streaming
+            if training and args.num_train_epochs and epoch >= args.num_train_epochs - 1:
+                is_finished = True
+            epoch += 1
+            if is_finished:
+                # Note that this approach will train for one additional step.
+                logger.info(f'Training of {epoch} epochs has been completed, the training has finished.')
+                args.train_iters = self.state.iteration + 1
 
-    def _load_adapter_base_checkpoint(self, *_args, **kwargs):
-        adapter_name = kwargs.pop('adapter_name', None) or 'ref_adapter'
-        sharded_state_dict = kwargs.get('sharded_state_dict')
-        if sharded_state_dict is None:
-            return checkpointing.origin__load_base_checkpoint(*_args, **kwargs)
-        model_keys = [k for k in sharded_state_dict.keys() if k.startswith('model')]
-        mapping = {}
-        for model_k in model_keys:
-            mapping[model_k] = {}
-            state_dict_model = {}
-            for k, v in sharded_state_dict[model_k].items():
-                if adapter_name not in k:
-                    continue
-                # lora
-                origin_k = k
-                k = k.replace(f'.{adapter_name}.', '.default.')
-                mapping[model_k][k] = origin_k
-                v.key = v.key.replace(f'.{adapter_name}.', '.default.')
-                state_dict_model[k] = v
-            sharded_state_dict[model_k] = state_dict_model
-            patch_merge_fn(state_dict_model)
-        res = checkpointing.origin__load_base_checkpoint(*_args, **kwargs)
-        for model_k in model_keys:
-            state_dict = res[0][model_k]
-            for k, origin_k in mapping[model_k].items():
-                v = state_dict.pop(k)
-                state_dict[origin_k] = v
-        return res
-
-    def _load_base_checkpoint(self, *_args, **kwargs):
-        sharded_state_dict = kwargs.get('sharded_state_dict')
-        if sharded_state_dict is None:
-            return checkpointing.origin__load_base_checkpoint(*_args, **kwargs)
-        model_keys = [k for k in sharded_state_dict.keys() if k.startswith('model')]
-        if self.args.train_type == 'full':
-            for k in model_keys:
-                patch_merge_fn(sharded_state_dict[k])
-            return checkpointing.origin__load_base_checkpoint(*_args, **kwargs)
-        mapping = {}
-        for model_k in model_keys:
-            mapping[model_k] = {}
-            state_dict_model = {}
-            for k, v in sharded_state_dict[model_k].items():
-                if 'lora_A' in k or 'lora_B' in k or 'original_module' in k:
-                    continue
-                # lora
-                if '.base_layer' in k:
-                    origin_k = k
-                    k = k.replace('.base_layer', '')
-                    mapping[model_k][k] = origin_k
-                    v.key = v.key.replace('.base_layer', '')
-                elif '.modules_to_save' in k:
-                    if '.modules_to_save.default' not in k:
-                        # e.g. ref_adapter
-                        continue
-                    # modules to save
-                    origin_k = k
-                    k = k.replace('.modules_to_save.default', '')
-                    mapping[model_k][k] = origin_k
-                    v.key = v.key.replace('.modules_to_save.default', '')
-                state_dict_model[k] = v
-            sharded_state_dict[model_k] = state_dict_model
-            patch_merge_fn(state_dict_model)
-        res = checkpointing.origin__load_base_checkpoint(*_args, **kwargs)
-        for model_k in model_keys:
-            state_dict = res[0][model_k]
-            for k, origin_k in mapping[model_k].items():
-                v = state_dict.pop(k)
-                state_dict[origin_k] = v
-        return res
-
-    @contextmanager
-    def _patch_load_state_dict(self, load_base_checkpoint):
-        checkpointing.origin__load_base_checkpoint = checkpointing._load_base_checkpoint
-        checkpointing._load_base_checkpoint = load_base_checkpoint
-
-        args = get_args()
-        origin_load_state_dict = torch.nn.Module.load_state_dict
-        origin_no_load_optim = args.no_load_optim
-        origin_no_load_rng = args.no_load_rng
-        origin_finetune = args.finetune
-
-        def load_state_dict(self, state_dict, strict: bool = True, *args, **kwargs):
-            strict = False
-            return origin_load_state_dict(self, state_dict, strict, *args, **kwargs)
-
-        if args.train_type != 'full':
-            torch.nn.Module.load_state_dict = load_state_dict
-            args.no_load_optim = True
-            args.no_load_rng = True
-            args.finetune = True
-        try:
-            yield
-        finally:
-            checkpointing._load_base_checkpoint = checkpointing.origin__load_base_checkpoint
-            torch.nn.Module.load_state_dict = origin_load_state_dict
-            args.no_load_optim = origin_no_load_optim
-            args.no_load_rng = origin_no_load_rng
-            args.finetune = origin_finetune
+    def _get_param_groups_mcore_016(
+        self,
+        model_chunks: List[MegatronModule],
+        config: OptimizerConfig,
+        config_overrides,
+    ) -> List[Dict]:
+        return self._get_param_groups(
+            model_chunks,
+            no_weight_decay_cond=None,
+            scale_lr_cond=None,
+            lr_mult=1.,
+            lr=config.lr,
+            min_lr=config.min_lr,
+            decoupled_lr=config.decoupled_lr,
+            decoupled_min_lr=config.decoupled_min_lr,
+        )
 
     # Code borrowed from Megatron-LM
     def _get_param_groups(
@@ -276,13 +389,21 @@ class BaseMegatronTrainer(ABC):
         Returns:
             List of parameter groups.
         """
-
+        args = self.args
+        if decoupled_min_lr is None:
+            decoupled_min_lr = min_lr
+        is_multimodal = args.megatron_model_meta.is_multimodal
+        if args.vit_lr is not None or args.aligner_lr is not None:
+            assert is_multimodal, 'vit_lr and aligner_lr are only supported for multimodal models.'
+            vit_lr = args.vit_lr if args.vit_lr is not None else args.lr
+            aligner_lr = args.aligner_lr if args.aligner_lr is not None else args.lr
+            logger.info_once(f'vit_lr: {vit_lr}, aligner_lr: {aligner_lr}, llm_lr: {args.lr}')
         use_decoupled_learning_rate = decoupled_lr is not None
 
-        # Map (wd_mult, lr_mult, is_expert_parallel, is_decoupled_lr) to params.
+        # Map (wd_mult, max_lr, min_lr, is_expert_parallel, is_decoupled_lr) to params.
         params_map = {}
         for model_chunk in model_chunks:
-            visual = model_chunk.module.module.visual
+            visual = model_chunk.module.module.visual if is_multimodal else None
             for name, param in model_chunk.named_parameters():
                 if not param.requires_grad:
                     continue
@@ -291,6 +412,9 @@ class BaseMegatronTrainer(ABC):
 
                 if no_weight_decay_cond is not None:
                     no_wd: bool = no_weight_decay_cond(name, param)
+                elif args.apply_wd_to_qk_layernorm and any(
+                        name.endswith(k) for k in ['q_layernorm.weight', 'k_layernorm.weight']):
+                    no_wd = False
                 else:
                     # Do not regularize biases and norm parameters.
                     #  optionally, also skip weight decay for embedding parameters if requested
@@ -300,6 +424,7 @@ class BaseMegatronTrainer(ABC):
                         name.endswith('.bias') or len(param.shape) == 1
                         or (default_skip_embedding_weight_decay and 'embedding' in name))
                 _lr_mult = lr_mult
+                lr_override = None
                 if scale_lr_cond is not None:
                     scale_lr = scale_lr_cond(name, param)
                 else:
@@ -312,12 +437,12 @@ class BaseMegatronTrainer(ABC):
                                      for k in visual._vision_tower) and not is_aligner
                     else:
                         is_aligner, is_vit = False, False
-                    if is_vit and self.args.vit_lr:
+                    if is_vit and args.vit_lr is not None:
                         scale_lr = True
-                        _lr_mult = self.args.vit_lr / lr
-                    elif is_aligner and self.args.aligner_lr:
+                        lr_override = args.vit_lr
+                    elif is_aligner and args.aligner_lr is not None:
                         scale_lr = True
-                        _lr_mult = self.args.aligner_lr / lr
+                        lr_override = args.aligner_lr
 
                 if not no_wd and not scale_lr:
                     wd_mult, _lr_mult = 1.0, 1.0
@@ -334,7 +459,18 @@ class BaseMegatronTrainer(ABC):
                 if use_decoupled_learning_rate and getattr(param, 'is_embedding_or_output_parameter', False):
                     is_decoupled_lr = True
 
-                key = (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr)
+                if lr_override is not None:
+                    _max_lr = lr_override
+                    _min_lr = 0. if lr == 0. or lr_override == 0. else min_lr * lr_override / lr
+                elif is_decoupled_lr:
+                    assert decoupled_lr is not None
+                    _max_lr = decoupled_lr * _lr_mult
+                    _min_lr = decoupled_min_lr * _lr_mult
+                else:
+                    _max_lr = lr * _lr_mult
+                    _min_lr = min_lr * _lr_mult
+
+                key = (wd_mult, _max_lr, _min_lr, is_expert_parallel, is_decoupled_lr)
                 if key not in params_map:
                     params_map[key] = []
                 params_map[key].append(param)
@@ -352,85 +488,63 @@ class BaseMegatronTrainer(ABC):
 
         param_groups = []
         for key in params_key:
-            wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr = key
+            wd_mult, _max_lr, _min_lr, is_expert_parallel, is_decoupled_lr = key
             params = params_map[key] if key in params_map else []
             param_group = {
                 'params': params,
                 'wd_mult': wd_mult,
-                'lr_mult': _lr_mult,
+                'lr_mult': 1.,
                 'is_expert_parallel': is_expert_parallel,
                 'is_decoupled_lr': is_decoupled_lr,
             }
             # Ensure param_group has required keys for matching when loading optimizer state
             # See MegatronOptimizer._filter_and_reorder_param_groups.
-            assert set(param_group.keys()) - set(param_group_identifier_keys) == {'params'}
+            if param_group_identifier_keys is not None:
+                assert set(param_group.keys()) - set(param_group_identifier_keys) == {'params'}
+            param_group['max_lr'] = _max_lr
+            param_group['min_lr'] = _min_lr
             param_groups.append(param_group)
-
-        param_groups = _update_min_and_max_lr_in_param_groups(
-            param_groups,
-            lr=lr,
-            min_lr=min_lr,
-            decoupled_lr=decoupled_lr,
-            decoupled_min_lr=decoupled_min_lr,
-        )
-
         return param_groups
 
     @contextmanager
     def _patch_get_param_groups(self):
-        if not self.args.megatron_model_meta.is_multimodal or (self.args.vit_lr is None
-                                                               and self.args.aligner_lr is None):
-            yield
-            return
         from megatron.core import optimizer
-
         _get_param_groups = optimizer._get_param_groups
-        optimizer._get_param_groups = self._get_param_groups
+        if mcore_016:
+            optimizer._get_param_groups = self._get_param_groups_mcore_016
+        else:
+            optimizer._get_param_groups = self._get_param_groups
         try:
             yield
         finally:
             optimizer._get_param_groups = _get_param_groups
 
-    def setup_model_and_optimizer(self, model_provider_func, model_type, *_args, **kwargs):
+    def _load_iteration(self):
+        args = self.args
+        ckpt_dir = None
+        if args.tuner_type == 'full':
+            ckpt_dir = args.model
+        else:
+            ckpt_dir = args.adapters[0] if args.adapters else args.model
+        if ckpt_dir is None:
+            return 0
+        logger.info(f'checkpoint_dir: {ckpt_dir}')
+        tracker_path = os.path.join(ckpt_dir, 'latest_checkpointed_iteration.txt')
+        if not os.path.exists(tracker_path):
+            return 0
+        with open(tracker_path, 'r') as f:
+            iteration = int(f.read())
 
-        args = get_args()
+        common_path = os.path.join(ckpt_dir, f'iter_{iteration:07d}', 'common.pt')
+        if not os.path.exists(common_path):
+            return iteration
 
-        def new_model_provider_func(*_args, **kwargs):
-            model = model_provider_func(*_args, **kwargs)
-            if args.load_safetensors:
-                self.bridge.load_weights(model, args.model_dir)
-            self.unwrapped_models.append(model)
-            peft_model = prepare_mcore_model(model)
-            if args.load_safetensors and args.train_type == 'lora':
-                for adapters, name in [(args.adapters, 'default'), (args.ref_adapters, 'ref_adapter')]:
-                    if adapters:
-                        assert len(adapters) == 1, 'Currently only support one adapter.'
-                        self.bridge.load_weights(model, adapters[0], is_peft_format=True, adapter_name=name)
-            self.peft_models.append(peft_model)
-            return model
+        state_dict = torch.load(common_path)
+        if 'args' not in state_dict:
+            return iteration
+        self.args.consumed_train_samples = getattr(state_dict['args'], 'consumed_train_samples', 0)
 
-        self._init_multimodal_full()
-        with self._patch_load_state_dict(self._load_base_checkpoint), self._patch_get_param_groups():
-            model, optimizer, opt_param_scheduler = self._origin_setup_model_and_optimizer(
-                new_model_provider_func, model_type, *_args, **kwargs)
-        if args.initialize_embedding:
-            for m in self.unwrapped_models:
-                self._initialize_embedding(m)
-        if args.train_type != 'full' and args.modules_to_save:
-            for m in self.unwrapped_models:
-                copy_original_module_weight(m)
-        if args.ref_adapter_load is not None:
-            with self._patch_load_state_dict(self._load_adapter_base_checkpoint):
-                args.iteration, args.num_floating_point_operations_so_far = load_checkpoint(
-                    model, optimizer, opt_param_scheduler, load_arg='ref_adapter_load', strict=False)
-        if args.adapter_load is not None:
-            with adapter_state_dict_context():
-                args.iteration, args.num_floating_point_operations_so_far = load_checkpoint(
-                    model, optimizer, opt_param_scheduler, load_arg='adapter_load', strict=False)
-        if args.is_multimodal:
-            for m in self.unwrapped_models:
-                self._prepare_vit_gradient_checkpointing(m)
-        return model, optimizer, opt_param_scheduler
+        return iteration
 
     def _prepare_vit_gradient_checkpointing(self, model):
         visual = model.visual
@@ -441,7 +555,8 @@ class BaseMegatronTrainer(ABC):
             if self.args.vit_gradient_checkpointing:
                 dynamic_gradient_checkpointing(module, False)
                 try:
-                    module.gradient_checkpointing_enable(**(self.args.gradient_checkpointing_kwargs or {}))
+                    module.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs=self.args.vit_gradient_checkpointing_kwargs)
                     module.enable_input_require_grads()
                 except AttributeError:
                     pass
@@ -470,556 +585,550 @@ class BaseMegatronTrainer(ABC):
 
     def _all_reduce_metric(self,
                            metric: Dict[str, torch.Tensor],
-                           reduction=torch.distributed.ReduceOp.AVG) -> Dict[str, torch.Tensor]:
-        values = list(metric.values())
-        reporting_metric = values[0].new_tensor(values)
-        torch.distributed.all_reduce(reporting_metric, reduction, group=mpu.get_data_parallel_group())
+                           reduction=torch.distributed.ReduceOp.AVG,
+                           group=None) -> Dict[str, torch.Tensor]:
+        if group is None:
+            group = mpu.get_data_parallel_group()
+        reporting_metric = torch.stack(list(metric.values()), dim=0)
+        torch.distributed.all_reduce(reporting_metric, reduction, group=group)
         return {k: reporting_metric[i] for i, k in enumerate(metric.keys())}
-
-    def train_step(self, forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config, *args,
-                   **kwargs):
-        new_data_iterator = self._replace_data_iterator(data_iterator, model)
-        return self._origin_train_step(forward_step_func, new_data_iterator, model, optimizer, opt_param_scheduler,
-                                       config, *args, **kwargs)
-
-    # Code borrowed from NVIDIA/Megatron-LM
-    def evaluate(
-        self,
-        forward_step_func,
-        data_iterator,
-        model,
-        process_non_loss_data_func,
-        config,
-        verbose=False,
-        non_loss_data_func=None,
-        eval_iters=None,
-    ):
-        """Evaluation."""
-        args = get_args()
-        timers = get_timers()
-
-        timers('evaluate', log_level=0).start(barrier=True)
-        if args.vision_pretraining and args.vision_pretraining_type == 'dino':
-            from megatron.legacy.model.vision.knn_monitor import compute_feature_bank
-            compute_feature_bank(model)
-
-        # Turn on evaluation mode which disables dropout.
-        for model_module in model:
-            model_module.eval()
-
-        # Disable result validation during evaluation
-        rerun_state_machine = get_rerun_state_machine()
-        rerun_mode = rerun_state_machine.get_mode()
-        rerun_state_machine.set_mode(RerunMode.DISABLED)
-
-        total_loss_dict = {}
-
-        # make validation batch size independent from training batch size
-        eval_batch_size = args.global_batch_size
-        eval_num_microbatches = eval_batch_size // (args.micro_batch_size * args.data_parallel_size)
-        forward_backward_func = get_forward_backward_func()
-        if args.enable_cuda_graph and args.cuda_graph_scope == 'full_iteration':
-            from megatron.core.full_cuda_graph import FullCudaGraphWrapper
-            forward_backward_func = FullCudaGraphWrapper(
-                forward_backward_func, cuda_graph_warmup_steps=args.cuda_graph_warmup_steps)
-
-        if eval_iters is None:
-            eval_iters = args.eval_iters
-
-        with torch.no_grad(), tqdm(
-                total=eval_iters, dynamic_ncols=True, disable=not is_last_rank(), desc='Evaluate: ') as prog_bar:
-            iteration = 0
-            if verbose:
-                print_rank_0(f'Evaluating on {eval_iters * eval_batch_size} samples')
-            while iteration < eval_iters:
-                iteration += 1
-                prog_bar.update()
-                if verbose:
-                    print_rank_0(f'Evaluating iter {iteration}/{eval_iters}')
-
-                # Don't care about timing during evaluation
-                config.timers = None
-                ft_integration.on_eval_step_start()
-                new_data_iterator = self._replace_data_iterator(data_iterator, model)
-                loss_dicts = forward_backward_func(
-                    forward_step_func=forward_step_func,
-                    data_iterator=new_data_iterator,
-                    model=model,
-                    num_microbatches=eval_num_microbatches,
-                    seq_length=args.seq_length,
-                    micro_batch_size=args.micro_batch_size,
-                    decoder_seq_length=args.decoder_seq_length,
-                    forward_only=True,
-                )
-                ft_integration.on_eval_step_end()
-                config.timers = get_timers()
-
-                # Empty unused memory
-                if args.empty_unused_memory_level >= 1:
-                    torch.cuda.empty_cache()
-
-                if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                    if self.megatron_core_013:
-                        for key in loss_dicts[0].keys():
-                            if key not in total_loss_dict:
-                                total_loss_dict[key] = torch.tensor([0.0, 0.0], dtype=torch.float).cuda()
-                            val = [x[key].view(-1) for x in loss_dicts]
-                            if val[0].numel() == 2:
-                                val = torch.vstack(val).sum(dim=0)
-                                torch.distributed.all_reduce(
-                                    val, group=mpu.get_data_parallel_group(with_context_parallel=True))
-                                total_loss_dict[key] += val
-                            elif val[0].numel() == 1:
-                                val = torch.cat(val).sum()
-                                total_loss_dict[key][0] += val
-                                total_loss_dict[key][1] += len(loss_dicts)
-                            else:
-                                raise ValueError(f'Invalid value shape: {val[0].shape} for key {key}')
-                    else:
-                        # Reduce across processes.
-                        for loss_dict in loss_dicts:
-                            for key in loss_dict:
-                                if key not in total_loss_dict:
-                                    total_loss_dict[key] = torch.tensor([0.0, 0.0], dtype=torch.float).cuda()
-                                val = loss_dict[key]
-                                if isinstance(val, tuple) or isinstance(val, list):
-                                    total_loss_dict[key][0] += val[0]
-                                    total_loss_dict[key][1] += val[1]
-                                else:
-                                    total_loss_dict[key][0] += val
-                                    total_loss_dict[key][1] += 1
-                args.consumed_valid_samples += eval_batch_size
-
-                if args.exit_duration_in_mins:
-                    train_time = (time.time() - training._TRAIN_START_TIME) / 60.0
-                    done_cuda = torch.tensor([train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda')
-                    torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
-                    done = done_cuda.item()
-                    if done:
-                        rerun_state_machine.set_mode(rerun_mode)
-                        print_rank_0('Exiting during evaluation, timelimit reached')
-                        return None, None, True
-
-            collected_non_loss_data = None
-            if non_loss_data_func is not None:
-                collected_non_loss_data = non_loss_data_func(model)
-            elif process_non_loss_data_func is not None and is_last_rank():
-                collected_non_loss_data = forward_backward_func(
-                    forward_step_func=forward_step_func,
-                    data_iterator=data_iterator,
-                    model=model,
-                    num_microbatches=get_num_microbatches(),
-                    seq_length=args.seq_length,
-                    micro_batch_size=args.micro_batch_size,
-                    decoder_seq_length=args.decoder_seq_length,
-                    forward_only=True,
-                    collect_non_loss_data=True,
-                )
-
-        # Move model back to the train mode.
-        for model_module in model:
-            model_module.train()
-
-        for key in total_loss_dict:
-            numerator, denominator = total_loss_dict[key]
-            total_loss_dict[key] = numerator / denominator
-
-        timers('evaluate').stop()
-        timers.log(['evaluate'])
-        self.custom_log(total_loss_dict, 'eval')
-        rerun_state_machine.set_mode(rerun_mode)
-        if is_last_rank():
-            logs = {}
-            for key, val in total_loss_dict.items():
-                logs[f'eval_{key}'] = round(val.item(), 8)
-            self.jsonl_writer.append(logs)
-        return total_loss_dict, collected_non_loss_data, False
-
-    def custom_log(self, total_loss_dict, mode: Literal['train', 'eval']) -> None:
-        advanced_iters = total_loss_dict['advanced iterations'] if mode == 'train' else 1
-        total_loss_dict.update({
-            k: torch.tensor([v * advanced_iters], device='cuda')
-            for k, v in SwiftMixin.compute_custom_metrics(self.custom_metrics[mode]).items()
-        })
-
-    # Code borrowed from NVIDIA/Megatron-LM
-    def training_log(self, loss_dict, total_loss_dict, learning_rate, decoupled_learning_rate, iteration, loss_scale,
-                     report_memory_flag, skipped_iter, grad_norm, params_norm, num_zeros_in_grad):
-        """Log training information such as losses, timing, ...."""
-        args = get_args()
-        timers = get_timers()
-        writer = get_tensorboard_writer()
-        wandb_writer = get_wandb_writer()
-
-        # Advanced, skipped, and Nan iterations.
-        advanced_iters_key = 'advanced iterations'
-        skipped_iters_key = 'skipped iterations'
-        nan_iters_key = 'nan iterations'
-        # Advanced iterations.
-        if not skipped_iter:
-            total_loss_dict[advanced_iters_key] = total_loss_dict.get(advanced_iters_key, 0) + 1
-        else:
-            if advanced_iters_key not in total_loss_dict:
-                total_loss_dict[advanced_iters_key] = 0
-        # Skipped iterations.
-        total_loss_dict[skipped_iters_key] = total_loss_dict.get(skipped_iters_key, 0) + skipped_iter
-        # Update losses and set nan iterations
-        got_nan = False
-        for key in loss_dict:
-            if not skipped_iter:
-                total_loss_dict[key] = total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float,
-                                                                             device='cuda')) + loss_dict[key]
-            else:
-                value = loss_dict[key].float().sum().item()
-                is_nan = value == float('inf') or value == -float('inf') or value != value
-                got_nan = got_nan or is_nan
-        total_loss_dict[nan_iters_key] = total_loss_dict.get(nan_iters_key, 0) + int(got_nan)
-
-        # Logging.
-        timers_to_log = [
-            'forward-backward', 'forward-compute', 'backward-compute', 'batch-generator', 'forward-recv',
-            'forward-send', 'backward-recv', 'backward-send', 'forward-send-forward-recv', 'forward-send-backward-recv',
-            'backward-send-forward-recv', 'backward-send-backward-recv', 'forward-backward-send-forward-backward-recv',
-            'layernorm-grads-all-reduce', 'embedding-grads-all-reduce', 'all-grads-sync', 'params-all-gather',
-            'optimizer-copy-to-main-grad', 'optimizer-unscale-and-check-inf', 'optimizer-clip-main-grad',
-            'optimizer-count-zeros', 'optimizer-inner-step', 'optimizer-copy-main-to-model-params', 'optimizer'
-        ]
-
-        # Calculate batch size.
-        batch_size = args.micro_batch_size * args.data_parallel_size * get_num_microbatches()
-
-        # Track app tag & app tag ID
-        one_logger_utils.track_app_tag(batch_size, args.world_size, args.seq_length)
-
-        total_iterations = total_loss_dict[advanced_iters_key] + total_loss_dict[skipped_iters_key]
-
-        # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
-        learning_rate = reduce_max_stat_across_model_parallel_group(learning_rate)
-        # Tensorboard values.
-        # Timer requires all the ranks to call.
-        if args.log_timers_to_tensorboard and (iteration % args.tensorboard_log_interval == 0):
-            timers.write(timers_to_log, writer, iteration, normalizer=total_iterations)
-        if writer and (iteration % args.tensorboard_log_interval == 0):
-            if wandb_writer:
-                wandb_writer.log({'samples vs steps': args.consumed_train_samples}, iteration)
-            writer.add_scalar('learning-rate', learning_rate, iteration)
-            writer.add_scalar('learning-rate vs samples', learning_rate, args.consumed_train_samples)
-            if wandb_writer:
-                wandb_writer.log({'learning-rate': learning_rate}, iteration)
-            if args.decoupled_lr is not None:
-                writer.add_scalar('decoupled-learning-rate', decoupled_learning_rate, iteration)
-            if args.skipped_train_samples > 0:
-                writer.add_scalar('skipped-train-samples', args.skipped_train_samples, iteration)
-                if wandb_writer:
-                    wandb_writer.log({'skipped-train-samples': args.skipped_train_samples}, iteration)
-            writer.add_scalar('batch-size', batch_size, iteration)
-            writer.add_scalar('batch-size vs samples', batch_size, args.consumed_train_samples)
-            if wandb_writer:
-                wandb_writer.log({'batch-size': batch_size}, iteration)
-            for key in loss_dict:
-                writer.add_scalar(key, loss_dict[key], iteration)
-                writer.add_scalar(key + ' vs samples', loss_dict[key], args.consumed_train_samples)
-                if wandb_writer:
-                    wandb_writer.log({key: loss_dict[key]}, iteration)
-            if args.log_loss_scale_to_tensorboard:
-                writer.add_scalar('loss-scale', loss_scale, iteration)
-                writer.add_scalar('loss-scale vs samples', loss_scale, args.consumed_train_samples)
-                if wandb_writer:
-                    wandb_writer.log({'loss-scale': loss_scale}, iteration)
-            if args.log_world_size_to_tensorboard:
-                writer.add_scalar('world-size', args.world_size, iteration)
-                writer.add_scalar('world-size vs samples', args.world_size, args.consumed_train_samples)
-                if wandb_writer:
-                    wandb_writer.log({'world-size': args.world_size}, iteration)
-            if grad_norm is not None:
-                writer.add_scalar('grad-norm', grad_norm, iteration)
-                writer.add_scalar('grad-norm vs samples', grad_norm, args.consumed_train_samples)
-                if wandb_writer:
-                    wandb_writer.log({'grad-norm': grad_norm}, iteration)
-            if num_zeros_in_grad is not None:
-                writer.add_scalar('num-zeros', num_zeros_in_grad, iteration)
-                writer.add_scalar('num-zeros vs samples', num_zeros_in_grad, args.consumed_train_samples)
-                if wandb_writer:
-                    wandb_writer.log({'num-zeros': num_zeros_in_grad}, iteration)
-            if params_norm is not None:
-                writer.add_scalar('params-norm', params_norm, iteration)
-                writer.add_scalar('params-norm vs samples', params_norm, args.consumed_train_samples)
-                if wandb_writer:
-                    wandb_writer.log({'params-norm': params_norm}, iteration)
-            if args.log_memory_to_tensorboard:
-                mem_stats = torch.cuda.memory_stats()
-                writer.add_scalar(
-                    'mem-reserved-bytes',
-                    mem_stats['reserved_bytes.all.current'],
-                    iteration,
-                )
-                writer.add_scalar(
-                    'mem-allocated-bytes',
-                    mem_stats['allocated_bytes.all.current'],
-                    iteration,
-                )
-                writer.add_scalar(
-                    'mem-max-allocated-bytes',
-                    mem_stats['allocated_bytes.all.peak'],
-                    iteration,
-                )
-                writer.add_scalar(
-                    'mem-allocated-count',
-                    mem_stats['allocation.all.current'],
-                    iteration,
-                )
-        if args.num_experts is not None:
-            moe_loss_scale = 1 / get_num_microbatches()
-            track_names = []
-            if args.moe_router_load_balancing_type in ['aux_loss', 'seq_aux_loss']:
-                track_names.append('load_balancing_loss')
-            if args.moe_z_loss_coeff is not None:
-                track_names.append('z_loss')
-            track_moe_metrics(
-                loss_scale=moe_loss_scale,
-                iteration=iteration,
-                writer=writer,
-                wandb_writer=wandb_writer,
-                total_loss_dict=total_loss_dict,
-                per_layer_logging=args.moe_per_layer_logging,
-                force_initialize=True,
-                track_names=track_names,
-                num_layers=args.num_layers,
-                moe_layer_freq=args.moe_layer_freq)
-        if args.mtp_num_layers is not None:
-            mtp_loss_scale = 1 / get_num_microbatches()
-            MTPLossLoggingHelper.track_mtp_metrics(mtp_loss_scale, iteration, writer, wandb_writer, total_loss_dict)
-        if iteration % args.log_interval == 0 or iteration == 1:
-            self.custom_log(total_loss_dict, 'train')
-            origin_total_loss_dict = total_loss_dict.copy()
-
-            if args.record_memory_history and is_last_rank():
-                snapshot = torch.cuda.memory._snapshot()
-                from pickle import dump
-                with open(args.memory_snapshot_path, 'wb') as f:
-                    dump(snapshot, f)
-
-            elapsed_time = timers('interval-time').elapsed(barrier=True)
-            elapsed_time_per_iteration = elapsed_time / total_iterations
-            train_percentage = iteration / args.train_iters
-            total_elapsed_time = timers('interval-time').active_time()
-            memory_GiB = round(torch.cuda.max_memory_reserved() / 1024**3, 2)
-            remaining_time = total_elapsed_time / train_percentage - total_elapsed_time
-            total_elapsed_time = format_time(total_elapsed_time)
-            remaining_time = format_time(remaining_time)
-
-            throughput = num_floating_point_operations(args, batch_size) / (
-                elapsed_time_per_iteration * 10**12 * args.world_size)
-
-            one_logger_utils.track_e2e_metrics(args.log_throughput, throughput)
-
-            if args.log_timers_to_tensorboard:
-                if writer:
-                    writer.add_scalar('iteration-time', elapsed_time_per_iteration, iteration)
-                if wandb_writer:
-                    wandb_writer.log({'iteration-time': elapsed_time_per_iteration}, iteration)
-            log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
-            log_string += ' iteration {:8d}/{:8d} |'.format(iteration, args.train_iters)
-            log_string += ' consumed samples: {:12d} |'.format(args.consumed_train_samples)
-            if args.skipped_train_samples > 0:
-                log_string += ' skipped samples: {:12d} |'.format(args.skipped_train_samples)
-            log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(elapsed_time_per_iteration * 1000.0)
-            log_string += (f' memory(GiB): {memory_GiB} |'
-                           f' elapsed time: {total_elapsed_time} | remaining time: {remaining_time} |')
-            if args.log_throughput:
-                log_string += f' throughput per GPU (TFLOP/s/GPU): {throughput:.1f} |'
-                if args.log_timers_to_tensorboard:
-                    if writer:
-                        writer.add_scalar('throughput', throughput, iteration)
-                    if wandb_writer:
-                        wandb_writer.log({'throughput': throughput}, iteration)
-            # Decoupled_learning_rate should be not None only on first and last pipeline stage.
-            log_string += f' learning rate: {learning_rate:.6E} |'
-            if args.decoupled_lr is not None and (mpu.is_pipeline_first_stage(ignore_virtual=True)
-                                                  or mpu.is_pipeline_last_stage(ignore_virtual=True)):
-                assert decoupled_learning_rate is not None
-                log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
-            else:
-                assert decoupled_learning_rate is None
-            log_string += f' global batch size: {batch_size:5d} |'
-            for key in total_loss_dict:
-                if key not in [advanced_iters_key, skipped_iters_key, nan_iters_key]:
-                    avg = total_loss_dict[key].item() / float(max(1, total_loss_dict[advanced_iters_key]))
-                    log_string += ' {}: {:.6E} |'.format(key, avg)
-                    total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
-            log_string += f' loss scale: {loss_scale:.1f} |'
-            if grad_norm is not None:
-                log_string += f' grad norm: {grad_norm:.3f} |'
-            if num_zeros_in_grad is not None:
-                log_string += f' num zeros: {num_zeros_in_grad} |'
-            if params_norm is not None:
-                log_string += f' params norm: {params_norm:.3f} |'
-            log_string += ' number of skipped iterations: {:3d} |'.format(total_loss_dict[skipped_iters_key])
-            log_string += ' number of nan iterations: {:3d} |'.format(total_loss_dict[nan_iters_key])
-            total_loss_dict[advanced_iters_key] = 0
-            total_loss_dict[skipped_iters_key] = 0
-            total_loss_dict[nan_iters_key] = 0
-            print_rank_last(log_string)
-            if report_memory_flag:
-                # Report memory after optimizer state has been initialized.
-                if torch.distributed.get_rank() == 0:
-                    num_microbatches = get_num_microbatches()
-                    report_theoretical_memory(args, num_microbatches=num_microbatches, verbose=True)
-                report_memory(f'(after {iteration} iterations)')
-                report_memory_flag = False
-            timers.log(timers_to_log, normalizer=args.log_interval)
-
-            if is_last_rank():
-                logs = {}
-                for key in origin_total_loss_dict:
-                    if key not in [advanced_iters_key, skipped_iters_key, nan_iters_key]:
-                        avg = origin_total_loss_dict[key].item() / float(
-                            max(1, origin_total_loss_dict[advanced_iters_key]))
-                        logs[key] = round(avg, 8)
-                if grad_norm is not None:
-                    logs['grad_norm'] = round(grad_norm, 8)
-                if params_norm is not None:
-                    logs['params_norm'] = round(params_norm, 8)
-                logs['learning_rate'] = round(learning_rate, 8)
-                logs['elapsed_time_per_iteration'] = round(elapsed_time_per_iteration, 8)
-                logs['memory(GiB)'] = memory_GiB
-                logs['elapsed_time'] = total_elapsed_time
-                logs['remaining_time'] = remaining_time
-                if args.log_throughput:
-                    logs['throughput'] = round(throughput, 8)
-                logs['loss_scale'] = round(loss_scale, 8)
-                logs['consumed_samples'] = args.consumed_train_samples
-                logs['global_step/max_steps'] = f'{iteration}/{args.train_iters}'
-                self.jsonl_writer.append(logs)
-
-        return report_memory_flag
 
     def merge_lora_adapters(self, adapter_name='default'):
         """Merge LoRA adapters into base model weights for vLLM inference."""
-        for model in self.unwrapped_models:
-            for module in model.modules():
-                if isinstance(module, LoraParallelLinear):
-                    # Merge all active adapters
-                    module.merge(adapter_names=[adapter_name])
+        with torch.no_grad():
+            for model in self.unwrapped_models:
+                for module in model.modules():
+                    if isinstance(module, LoraParallelLinear):
+                        # Merge all active adapters
+                        module.merge(adapter_names=[adapter_name])
 
     def unmerge_lora_adapters(self):
         """Unmerge LoRA adapters to restore training state."""
-        for model in self.unwrapped_models:
-            for module in model.modules():
-                if isinstance(module, LoraParallelLinear):
-                    # Unmerge to restore separate LoRA weights for training
-                    module.unmerge()
+        with torch.no_grad():
+            for model in self.unwrapped_models:
+                for module in model.modules():
+                    if isinstance(module, LoraParallelLinear):
+                        # Unmerge to restore separate LoRA weights for training
+                        module.unmerge()
 
-    def save_checkpoint(self, iteration, *_args, **kwargs):
-        args = get_args()
-        if args.train_type == 'lora' and args.merge_lora:
-            self.merge_lora_adapters()
-        save_peft_format = args.train_type == 'lora' and not args.merge_lora
-        if args.save_safetensors:
-            output_dir = os.path.join(args.save, f'checkpoint-{iteration}')
-            self.bridge.save_weights(self.unwrapped_models, output_dir, is_peft_format=save_peft_format)
-            if is_last_rank():
-                args_path = os.path.join(os.path.dirname(output_dir), 'args.json')
-                if os.path.exists(args_path):
-                    shutil.copy(args_path, os.path.join(output_dir, 'args.json'))
+    @staticmethod
+    def copy_path(src_path: str, tgt_path: str):
+        if not is_master():
+            return
+        if not os.path.exists(src_path):
+            raise FileNotFoundError(f'Source path does not exist: {src_path}')
+
+        if os.path.isfile(src_path):
+            os.makedirs(os.path.dirname(tgt_path), exist_ok=True)
+            shutil.copy(src_path, tgt_path)
+        elif os.path.isdir(src_path):
+            shutil.copytree(src_path, tgt_path, dirs_exist_ok=True)
         else:
-            with adapter_state_dict_context(is_peft_format=save_peft_format):
-                return self._origin_save_checkpoint(iteration, *_args, **kwargs)
-        if args.train_type == 'lora' and args.merge_lora:
-            self.unmerge_lora_adapters()
+            raise ValueError(f'Source path is neither a file nor a directory: {src_path}')
 
-    def _patch_megatron(self):
-        # support max_epochs
-        self._origin_train_step = training.train_step
-        training.train_step = self.train_step
-        training.cyclic_iter = self.new_cyclic_iter
-        # patch training_log
-        self._origin_training_log = training.training_log
-        training.training_log = self.training_log
-        # patch evaluate
-        self._origin_evaluate = training.evaluate
-        training.evaluate = self.evaluate
-        # patch model and optimizer
-        self._origin_setup_model_and_optimizer = training.setup_model_and_optimizer
-        training.setup_model_and_optimizer = self.setup_model_and_optimizer
-        # patch save_checkpoint
-        self._origin_save_checkpoint = training.save_checkpoint
-        training.save_checkpoint = self.save_checkpoint
+    def _prepare_data_iterator(self, train_dataset, val_dataset=None, use_origin_cyclic: bool = False):
+        train_dataloader, val_dataloader = self._prepare_dataloader(train_dataset, val_dataset)
+        train_data_iterator = iter(self.cyclic_iter(train_dataloader, use_origin_cyclic=use_origin_cyclic))
+        val_data_iterator = None
+        if val_dataset is not None:
+            val_data_iterator = iter(self.cyclic_iter(val_dataloader, use_origin_cyclic=use_origin_cyclic))
+        return train_data_iterator, val_data_iterator
 
-    def _init_multimodal_full(self):
-        args = get_args()
-        visual_cls = self.args.megatron_model_meta.visual_cls
-        if args.train_type == 'full' and args.is_multimodal and visual_cls is not None:
-            vision_tower = [f'visual.{vit}' for vit in visual_cls._vision_tower]
-            aligner = [f'visual.{aligner}' for aligner in visual_cls._aligner]
-            if args.freeze_llm:
-                args.freeze_parameters.append('language_model')
-            if args.freeze_vit:
-                args.freeze_parameters += vision_tower
-            if args.freeze_aligner:
-                args.freeze_parameters += aligner
-            else:
-                args.trainable_parameters += aligner
-            if args.freeze_parameters:
-                logger.info(f'freeze_parameters: {args.freeze_parameters}')
-            if args.trainable_parameters:
-                logger.info(f'additional trainable_parameters: {args.trainable_parameters}')
-
-    def train(self, train_dataset, val_dataset, data_collator):
+    def setup_model_training(self):
         args = self.args
-        datasets_provider = get_swift_datasets_provider(train_dataset, val_dataset)
-        datasets_provider.is_distributed = True
-        with self.patch_megatron_data_collator(data_collator), self._get_iters(train_dataset, val_dataset):
-            extra_args_provider = args.megatron_model_meta.extra_args_provider
-            pretrain(
-                datasets_provider,
-                args.megatron_model_meta.model_provider,
-                ModelType.encoder_or_decoder,
-                self.forward_step,
-                extra_args_provider=extra_args_provider,
-                args_defaults=args.extra_args)
+        config = self.config
 
-    @contextmanager
-    def patch_megatron_data_collator(self, data_collator):
-        origin_build_pretraining_data_loader = training.build_pretraining_data_loader
+        for m in self.wrapped_models:
+            m.train()
 
-        def build_pretraining_data_loader(*_args, **kwargs):
-            args = get_args()
-            res = origin_build_pretraining_data_loader(*_args, **kwargs)
-            if res is not None and args.dataloader_type != 'external':
-                res.collate_fn = data_collator
-            return res
+        if args.is_multimodal:
+            for m in self.unwrapped_models:
+                self._prepare_vit_gradient_checkpointing(m)
 
-        training.build_pretraining_data_loader = build_pretraining_data_loader
-        try:
-            yield
-        finally:
-            training.build_pretraining_data_loader = origin_build_pretraining_data_loader
+        config.grad_scale_func = self.optimizer.scale_loss
+        if isinstance(self.wrapped_models[0], (DDP, megatron_FSDP)) and args.overlap_grad_reduce:
+            assert config.no_sync_func is None, ('When overlap_grad_reduce is True, config.no_sync_func must be None; '
+                                                 'a custom no_sync_func is not supported when overlapping grad-reduce')
+            config.no_sync_func = [model_chunk.no_sync for model_chunk in self.wrapped_models]
+            if len(self.wrapped_models) == 1:
+                config.no_sync_func = config.no_sync_func[0]
+            if args.align_grad_reduce:
+                config.grad_sync_func = [model_chunk.start_grad_sync for model_chunk in self.wrapped_models]
+                if len(self.wrapped_models) == 1:
+                    config.grad_sync_func = config.grad_sync_func[0]
+        if args.overlap_param_gather and args.align_param_gather:
+            config.param_sync_func = [model_chunk.start_param_sync for model_chunk in self.wrapped_models]
+            if len(self.wrapped_models) == 1:
+                config.param_sync_func = config.param_sync_func[0]
+        config.finalize_model_grads_func = finalize_model_grads
+
+        self._start_iteration = self.state.iteration
+        self._pre_hook_enabled = False
+        if should_disable_forward_pre_hook(args):
+            disable_forward_pre_hook(self.wrapped_models, param_sync=False)
+            self._saved_param_sync_func = config.param_sync_func
+            config.param_sync_func = None
+
+        if args.nccl_comm_warmup:
+            # Eagerly create NCCL communicators while GPU memory is still free. Lazily-initialized
+            # comms (e.g. the dp/cp loss all-reduce and grad-sync coalescing) otherwise first fire
+            # at the iteration-1 memory peak, where NCCL's internal cudaMalloc can fail with
+            # "Failed to CUDA calloc async N bytes". A 1-element dummy all-reduce per group is
+            # numerically inert and forces the communicator to be created up front.
+            dummy = torch.zeros(1, device=get_current_device())
+            warmed = 0
+            for getter, kwargs in (
+                (mpu.get_data_parallel_group, {
+                    'with_context_parallel': True
+                }),
+                (mpu.get_data_parallel_group, {}),
+                (mpu.get_context_parallel_group, {}),
+                (mpu.get_tensor_model_parallel_group, {}),
+                (mpu.get_pipeline_model_parallel_group, {}),
+                (mpu.get_model_parallel_group, {}),
+                (mpu.get_embedding_group, {}),
+                (mpu.get_position_embedding_group, {}),
+            ):
+                try:
+                    group = getter(**kwargs)
+                except (AssertionError, ValueError, TypeError):
+                    continue
+                for g in (group if isinstance(group, list) else [group]):
+                    if g is not None:
+                        torch.distributed.all_reduce(dummy, group=g)
+                        warmed += 1
+            torch.cuda.synchronize()
+            logger.info(f'NCCL communicator warm-up done ({warmed} groups).')
+
+        self.call_event('on_train_begin')
+        self._train_metrics = {}
+
+    def setup_training(self, train_dataset, val_dataset):
+        self.setup_model_training()
+        args = self.args
+        if args.virtual_pipeline_model_parallel_size is not None:
+            train_data_iterator, val_data_iterator = [], []
+            for _ in range(args.virtual_pipeline_model_parallel_size):
+                train_it, val_it = self._prepare_data_iterator(train_dataset, val_dataset)
+                train_data_iterator.append(train_it)
+                val_data_iterator.append(val_it)
+        else:
+            train_data_iterator, val_data_iterator = self._prepare_data_iterator(train_dataset, val_dataset)
+        return train_data_iterator, val_data_iterator
+
+    def run_train_step(self, train_data_iterator, val_data_iterator):
+        """Execute one training iteration including logging / eval / save.
+
+        Returns ``True`` if training should continue, ``False`` if done.
+        """
+        args = self.args
+        config = self.config
+        state = self.state
+
+        self.call_event('on_step_begin')
+        maybe_finalize_async_save(args, blocking=False)
+        metrics, grad_norm, update_successful = self.train_step(train_data_iterator)
+
+        if state.iteration == self._start_iteration:
+            if update_successful:
+                if should_disable_forward_pre_hook(args):
+                    enable_forward_pre_hook(self.wrapped_models)
+                    config.param_sync_func = self._saved_param_sync_func
+                    self._pre_hook_enabled = True
+            else:
+                self._start_iteration = state.iteration + 1
+
+        state.iteration += 1
+        self.call_event('on_step_end')
+        self._aggregated_metrics(metrics, self._train_metrics)
+        self._train_metrics['grad_norm'] = grad_norm
+        learning_rate = self._get_reported_learning_rate()
+        if learning_rate is not None:
+            self._train_metrics['learning_rate'] = learning_rate
+        if state.should_log:
+            state.should_log = False
+            self.on_log(logs=self._train_metrics)
+            self._train_metrics = {}
+
+        eval_metrics = None
+        if state.should_eval:
+            state.should_eval = False
+            if should_disable_forward_pre_hook(args):
+                disable_forward_pre_hook(self.wrapped_models)
+                self._pre_hook_enabled = False
+            eval_metrics = self.evaluate(val_data_iterator)
+            for m in self.wrapped_models:
+                m.train()
+            if should_disable_forward_pre_hook(args):
+                enable_forward_pre_hook(self.wrapped_models)
+                self._pre_hook_enabled = True
+
+        if state.should_save:
+            self._determine_best_metric(eval_metrics)
+            if should_disable_forward_pre_hook(args):
+                disable_forward_pre_hook(self.wrapped_models)
+            state.should_save = False
+            self.save_checkpoint()
+            self.call_event('on_save', output_dir=self.state.last_model_checkpoint)
+            if should_disable_forward_pre_hook(args):
+                enable_forward_pre_hook(self.wrapped_models)
+
+        return state.iteration < args.train_iters
+
+    def finalize_training(self):
+        """Cleanup after training loop completes."""
+        self.call_event('on_train_end')
+        if self._pre_hook_enabled:
+            disable_forward_pre_hook(self.wrapped_models)
+        maybe_finalize_async_save(self.args, blocking=True, terminate=True)
+
+    def train(self, train_dataset, val_dataset):
+        train_data_iterator, val_data_iterator = self.setup_training(train_dataset, val_dataset)
+        while self.state.iteration < self.args.train_iters:
+            self.run_train_step(train_data_iterator, val_data_iterator)
+        self.finalize_training()
+
+    def _determine_best_metric(self, metrics) -> bool:
+        args = self.args
+        state = self.state
+        if (args.metric_for_best_model is None or metrics is None or not is_last_rank()
+                or args.metric_for_best_model not in metrics):
+            if args.metric_for_best_model is None:
+                return False
+            tensor = torch.zeros((3, ), device=get_current_device(), dtype=torch.float64)
+            torch.distributed.all_reduce(tensor)
+            is_new_best_metric = bool(tensor[2].item())
+            if is_new_best_metric:
+                state.best_metric = tensor[0].item()
+                state.best_global_step = int(tensor[1].item())
+            return is_new_best_metric
+        metric_value = metrics[args.metric_for_best_model]
+        op = operator.ge if args.greater_is_better else operator.le
+        if state.best_metric is None:
+            state.best_metric = float('-inf') if args.greater_is_better else float('inf')
+
+        is_new_best_metric = False
+        if op(metric_value, state.best_metric):
+            state.best_metric = metric_value
+            state.best_global_step = state.global_step
+            is_new_best_metric = True
+        tensor = torch.tensor([state.best_metric, state.best_global_step, is_new_best_metric],
+                              device=get_current_device(),
+                              dtype=torch.float64)
+        torch.distributed.all_reduce(tensor)
+        return is_new_best_metric
+
+    def save_checkpoint(self):
+        args = self.args
+        state = self.state
+        args.consumed_train_samples = state.consumed_train_samples
+        iteration = state.iteration
+        output_dir = os.path.join(args.output_dir, f'checkpoint-{iteration}')
+        os.makedirs(output_dir, exist_ok=True)
+        args_path = os.path.join(os.path.dirname(output_dir), 'args.json')
+        self.copy_path(args_path, os.path.join(output_dir, 'args.json'))
+        if args.save_safetensors and args.no_save_optim:
+            model = []
+        else:
+            model = self.wrapped_models
+        gc_collect()
+        async_deferred = save_mcore_checkpoint(
+            args,
+            model,
+            self.optimizer,
+            self.opt_param_scheduler,
+            iteration=iteration,
+            peft_format=args.tuner_type == 'lora',
+            output_dir=output_dir,
+            # Under `--async_save` the weights are still being written when this returns, so hand the symlink
+            # update to the async request: it then runs once they are durable, and after the safetensors below
+            # (written synchronously), i.e. only when the whole checkpoint is complete.
+            async_finalize_fn=partial(update_last_checkpoint_symlink, output_dir))
+        state.last_model_checkpoint = output_dir
+        if state.best_global_step is not None:
+            best_model_checkpoint = os.path.join(args.output_dir, f'checkpoint-{state.best_global_step}')
+            if os.path.exists(best_model_checkpoint):
+                state.best_model_checkpoint = best_model_checkpoint
+        # safetensors
+        if args.save_safetensors:
+            skip_saving_adapter = args.tuner_type == 'lora_llm' or (
+                args.tuner_type == 'lora' and args.merge_lora and not hasattr(self.bridge, '_support_hf_grouped_lora'))
+            save_missing_weights = args.save_missing_weights and args.model_dir
+
+            if not skip_saving_adapter:
+                self.bridge.save_weights(
+                    self.unwrapped_models,
+                    output_dir,
+                    peft_format=args.tuner_type == 'lora',
+                    args=args,
+                    processor=self.template.processor,
+                    save_missing_weights=save_missing_weights,
+                )
+            # merge-lora does not store lora, lora saving may report an error (Qwen3-VL-Moe)
+            if args.tuner_type != 'full' and args.merge_lora:
+                self.merge_lora_adapters()
+                origin_output_dir = output_dir
+                output_dir = f'{output_dir}-merged'
+                os.makedirs(output_dir, exist_ok=True)
+                for fname in ['latest_checkpointed_iteration.txt', 'args.json']:
+                    src_path = os.path.join(origin_output_dir, fname)
+                    self.copy_path(src_path, os.path.join(output_dir, fname))
+                # common.pt
+                common_path = os.path.join(origin_output_dir, f'iter_{iteration:07d}', 'common.pt')
+                if os.path.exists(common_path):
+                    tgt_common_path = os.path.join(output_dir, f'iter_{iteration:07d}', 'common.pt')
+                    os.makedirs(os.path.dirname(tgt_common_path), exist_ok=True)
+                    self.copy_path(common_path, tgt_common_path)
+                self.bridge.save_weights(
+                    self.unwrapped_models,
+                    output_dir,
+                    peft_format=False,
+                    args=args,
+                    processor=self.template.processor,
+                    save_missing_weights=save_missing_weights,
+                )
+                self.unmerge_lora_adapters()
+
+        if is_master():
+            if not async_deferred:
+                # `output_dir` may have been redirected to the `-merged` copy above, so link the canonical one.
+                update_last_checkpoint_symlink(state.last_model_checkpoint)
+            self._rotate_checkpoints(args.output_dir)
+
+    def _rotate_checkpoints(self, output_dir: str):
+        # Code borrowed from huggingface/transformers
+        args = self.args
+        if args.save_total_limit is None or args.save_total_limit <= 0:
+            return
+
+        checkpoints_sorted = self._sorted_checkpoints(output_dir)
+        if len(checkpoints_sorted) <= args.save_total_limit:
+            return
+
+        number_of_checkpoints_to_delete = max(0, len(checkpoints_sorted) - args.save_total_limit)
+        checkpoints_to_be_deleted = checkpoints_sorted[:number_of_checkpoints_to_delete]
+        for checkpoint in checkpoints_to_be_deleted:
+            shutil.rmtree(checkpoint, ignore_errors=True)
+            if os.path.exists(f'{checkpoint}-merged'):
+                shutil.rmtree(f'{checkpoint}-merged', ignore_errors=True)
+
+    def _sorted_checkpoints(self, output_dir: str):
+        # Code borrowed from huggingface/transformers
+        state = self.state
+        glob_checkpoints = [
+            str(p) for p in Path(output_dir).glob('checkpoint-*') if p.is_dir() and not p.name.endswith('-merged')
+        ]
+        # Sort by modification time
+        checkpoints_sorted = sorted(glob_checkpoints, key=os.path.getmtime)
+
+        # Make sure we don't delete the best model.
+        if state.best_model_checkpoint is not None and state.best_model_checkpoint in checkpoints_sorted:
+            best_model_index = checkpoints_sorted.index(state.best_model_checkpoint)
+            checkpoints_sorted.pop(best_model_index)
+            checkpoints_sorted.append(state.best_model_checkpoint)
+        return checkpoints_sorted
+
+    def _get_reported_learning_rate(self) -> Optional[float]:
+        """Pick the learning rate to report when the parameter groups no longer share one.
+
+        mcore flags the groups that follow the `--lr` schedule with `default_config` and reports those, so a
+        group with an overridden learning rate (`--muon_lr`) is not mistaken for the headline number. Param
+        groups built without that flag all count as default.
+        """
+        param_groups = [param_group for param_group in self.optimizer.param_groups if param_group['params']]
+        for param_group in param_groups:
+            if param_group.get('default_config', True):
+                return param_group['lr']
+        return param_groups[0]['lr'] if param_groups else None
+
+    def training_log(self, metrics, grad_norm):
+        logger.info(f'metrics: {metrics}, grad_norm: {grad_norm}, '
+                    f'learning_rate: {self._get_reported_learning_rate()}')
+
+    def evaluate(self, val_data_iterator):
+        args = self.args
+        for m in self.wrapped_models:
+            m.eval()
+        eval_metrics = {}
+        forward_backward_func = get_forward_backward_func()
+        self.call_event('on_eval_begin')
+        with torch.no_grad():
+            for _ in range(args.eval_iters):
+                data_iterator = self._replace_data_iterator(val_data_iterator)
+                metrics = forward_backward_func(
+                    forward_step_func=self.forward_step,
+                    data_iterator=data_iterator,
+                    model=self.wrapped_models,
+                    num_microbatches=self.args.num_microbatches,
+                    seq_length=args.seq_length,
+                    micro_batch_size=args.micro_batch_size,
+                    forward_only=True,
+                )
+                self.call_event('on_eval_step')
+                self._aggregated_metrics(metrics, eval_metrics)
+        self.compute_eval_metrics(eval_metrics)
+        self.on_log(logs=eval_metrics, prefix='eval_')
+        self.call_event('on_eval_end')
+        return eval_metrics
+
+    def compute_eval_metrics(self, metrics):
+        if self.eval_metrics is not None and mpu.is_pipeline_last_stage():
+            metric = self.eval_metrics.compute()
+            for k, v in metric.items():
+                metrics[k] = v if isinstance(v, torch.Tensor) else torch.tensor(v)
+            self.eval_metrics.reset()
+
+    def _replace_data_iterator(self, data_iterator):
+        return data_iterator
+
+    def train_step(self, train_data_iterator):
+        args = self.args
+        forward_backward_func = get_forward_backward_func()
+        for m in self.wrapped_models:
+            m.zero_grad_buffer()
+        self.optimizer.zero_grad()
+        # TODO: refactor _replace_data_iterator
+        data_iterator = self._replace_data_iterator(train_data_iterator)
+
+        if self.enable_routing_replay:
+            RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
+        metrics = forward_backward_func(
+            forward_step_func=self.forward_step,
+            data_iterator=data_iterator,
+            model=self.wrapped_models,
+            num_microbatches=args.num_microbatches,
+            seq_length=args.seq_length,
+            micro_batch_size=args.micro_batch_size,
+            forward_only=False,
+        )
+
+        update_successful, grad_norm, _ = self.optimizer.step()
+        update_successful = logical_and_across_model_parallel_group(update_successful)
+        grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
+        if update_successful:
+            self.opt_param_scheduler.step(increment=args.global_batch_size)
+
+        if self.enable_routing_replay:
+            RouterReplay.clear_global_router_replay_action()
+            RouterReplay.clear_global_indices()
+
+        return metrics, grad_norm, update_successful
+
+    def _aggregated_metrics(self, metrics, total_metrics):
+        if 'n_steps' not in total_metrics:
+            total_metrics['n_steps'] = 0
+        total_metrics['n_steps'] += 1
+        if not metrics:
+            return
+        metrics = RowPreprocessor.rows_to_batched(metrics)
+        for key, val in metrics.items():
+            val = torch.stack([v for v in val if v is not None], dim=0)
+            if val[0].numel() == 2:
+                val = val.sum(dim=0)
+                if val[1] == 0:
+                    continue
+            elif val[0].numel() == 1:
+                val = val.new_tensor([val.sum(), val.shape[0]])
+            else:
+                raise ValueError(f'Invalid value shape: {val[0].shape} for key {key}')
+            if key not in total_metrics:
+                total_metrics[key] = torch.tensor([0.0, 0.0], dtype=torch.float32, device=torch.cuda.current_device())
+            total_metrics[key] += val
+
+    def _prepare_dataloader(self, train_dataset, val_dataset=None):
+        args = self.args
+        val_dataloader = None
+        if args.streaming:
+            train_dataloader = build_streaming_dataloader(args, train_dataset, self.data_collator)
+            if val_dataset is not None:
+                val_dataloader = build_streaming_dataloader(args, val_dataset, self.data_collator)
+            return train_dataloader, val_dataloader
+        train_batch_sampler = MegatronPretrainingRandomSampler(
+            train_dataset,
+            total_samples=len(train_dataset),
+            consumed_samples=self.state.consumed_train_samples,
+            micro_batch_size=args.micro_batch_size,
+            data_parallel_rank=mpu.get_data_parallel_rank(),
+            data_parallel_size=mpu.get_data_parallel_world_size(),
+            data_sharding=args.data_sharding,
+            shuffle=args.train_dataloader_shuffle,
+            group_by_length=args.group_by_length,
+        )
+        train_dataloader = self._create_dataloader(train_dataset, train_batch_sampler)
+        if val_dataset is not None:
+            val_batch_sampler = MegatronPretrainingSampler(
+                total_samples=len(val_dataset),
+                consumed_samples=0,
+                micro_batch_size=args.micro_batch_size,
+                data_parallel_rank=mpu.get_data_parallel_rank(),
+                data_parallel_size=mpu.get_data_parallel_world_size(),
+            )
+            val_dataloader = self._create_dataloader(val_dataset, val_batch_sampler)
+        return train_dataloader, val_dataloader
+
+    def _create_dataloader(self, dataset, batch_sampler):
+        args = self.args
+
+        dataloader_kwargs = {}
+        mp_context = getattr(args, 'dataloader_multiprocessing_context', None)
+        if mp_context is not None and args.dataloader_num_workers > 0:
+            dataloader_kwargs['multiprocessing_context'] = mp_context
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=args.dataloader_num_workers,
+            pin_memory=args.dataloader_pin_memory,
+            persistent_workers=args.dataloader_persistent_workers if args.dataloader_num_workers > 0 else False,
+            prefetch_factor=args.dataloader_prefetch_factor if args.dataloader_num_workers > 0 else None,
+            collate_fn=self.data_collator,
+            **dataloader_kwargs,
+        )
+        return dataloader
 
     @abstractmethod
     def forward_step(self, data_iterator, model):
         pass
 
-    def _prepare_batch(self, data, vp_stage, num_samples=None):
-        batch = get_batch_on_this_tp_rank(data, vp_stage=vp_stage)
-        if num_samples is None:
-            num_samples = batch.pop('num_samples')
-        args = get_args()
-        text_position_ids = batch.pop('text_position_ids', None)
-        if text_position_ids is None:
-            text_position_ids = batch.get('position_ids')
-        if args.padding_free and text_position_ids is not None:
-            batch['packed_seq_params'] = get_packed_seq_params(text_position_ids)
-            batch['packed_seq_params'].num_samples = num_samples
-        # slice batch along sequence dimension for context parallelism
-        batch = get_batch_on_this_cp_rank(batch)
-        return batch
+    def _prepare_batch(self, data, vp_stage=None):
+        return prepare_batch(self.args, data, vp_stage=vp_stage)
 
     def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""
-        args = get_args()
-        data = next(data_iterator)
-        is_finished = data.pop('is_finished', False)
-        if is_finished:
-            args.train_iters = args.curr_iteration + 1
-        return self._prepare_batch(data, vp_stage)
+        return self._prepare_batch(next(data_iterator), vp_stage)
+
+    def _collect_config_info(self) -> Dict[str, str]:
+        """
+        Collects trainer-specific configuration details.
+
+        Subclasses can override this method to provide additional configuration
+        information for model compatibility verification.
+
+        Returns:
+            Dict[str, str]: Configuration parameters as key-value pairs.
+        """
+        if self.__class__.__name__ == 'MegatronTrainer':
+            if not self.template.use_chat_template:
+                return {
+                    'seq2seq_mode': 'pt',
+                }
+            else:
+                return {
+                    'seq2seq_mode': 'sft',
+                }
+        return {}
+
+    def get_last_tokens(self, output_tensor, packed_seq_params=None, attention_mask=None):
+        if self.args.context_parallel_size > 1:
+            output_tensor = reconstruct_tensor_cp(output_tensor, packed_seq_params, dim=1)
+        if packed_seq_params is None:
+            # Compatible with attention_mask_2d
+            if attention_mask.dim() > 2:
+                attention_mask = (~attention_mask).sum(dim=(1, 2)) > 0
+            last_token_idx = get_last_valid_indices(attention_mask.long())
+            last_tokens = output_tensor[torch.arange(output_tensor.shape[0]), last_token_idx]
+        else:
+            num_samples = packed_seq_params.seq_lens.shape[0]
+            last_token_idx = packed_seq_params.cu_seqlens_q[:num_samples] + packed_seq_params.seq_lens - 1
+            last_tokens = output_tensor[0, last_token_idx]
+        return last_tokens
