@@ -1,0 +1,8 @@
+{
+  "project": "modelscope/ms-swift",
+  "release": "v4.5.3",
+  "commit": "faed594",
+  "source": "https://github.com/modelscope/ms-swift/releases/tag/v4.5.3",
+  "purpose": "Training and inference runtime used by VPTracker",
+  "notes": "The VPTracker reward plugins live in reward_funcs/. Install this exact release before running them."
+}

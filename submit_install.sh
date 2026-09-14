@@ -1,0 +1,16 @@
+rjob submit \
+    --name=rjob-swift-m1 \
+    --gpu=8 \
+    --memory=1500000 \
+    --cpu=128 \
+    --namespace=ailab-mineru4sh \
+    --charged-group=mineru4sh_gpu \
+    --private-machine=group \
+    --mount=gpfs://gpfs1/mineru4s:/mnt/shared-storage-user/mineru4s \
+    --image=registry.h.pjlab.org.cn/library/ml-base:22.04-pjlab \
+    -P 4 \
+    --host-network=true \
+    --custom-resources rdma/mlnx_shared=8 \
+    --custom-resources mellanox.com/mlnx_rdma=1 \
+    -e DISTRIBUTED_JOB=true \
+    -- bash -exc /mnt/shared-storage-user/mineru4s/jcwang/VPTrack/instal_flash_attn.sh

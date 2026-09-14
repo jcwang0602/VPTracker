@@ -1,8 +1,9 @@
 import os
 import numpy as np
 import sys
+from pathlib import Path
 
-sys.path.append("/mnt/shared-storage-user/mineru4s/jcwang/VPLT")
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 from utils.config_plot_style import config_plot_style
 from utils.config_sequence import config_sequence
 from utils.eval_tracker import eval_tracker
@@ -48,12 +49,12 @@ norm_dst = True
 
 # 获取跟踪器列表
 result_model_name = [
-    "OpenGVLab_InternVL2_5-1B",
+    "VPTracker-Qwen3.5-2B",
 ]
 
 trackers = []
 for model_name in result_model_name:
-    trackers.append({"name": model_name, "publish": "OpenGVLab"})
+    trackers.append({"name": model_name, "publish": "jcwang0602"})
 
 # 获取视频序列列表
 sequences = config_sequence(evaluation_dataset_type, seq_eval_config)

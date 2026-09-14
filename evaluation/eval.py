@@ -1,9 +1,10 @@
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append("/mnt/shared-storage-user/mineru4s/jcwang/VPTrack")
 import torch
 from evaluation.extract_results import extract_results
 from evaluation.tnl2k_dataset import TNL2KDataset
+from evaluation.otb_dataset import OTBDataset
 from evaluation.tnllt_dataset import TNLLTDataset
 
 
@@ -157,13 +158,21 @@ def print_results(
 
 
 if __name__ == "__main__":
-    dataset_name = "tnllt"  # tnl2k,tnllt
-    tracking_results_dir = "outputs/results"
+    dataset_name = "tnl2k"  # tnl2k, otb, tnllt
+    tracking_results_dir = "outputs_vpt_r1/results_batchpool"
+    # 获取tracking_results_dir下的所有文件夹
+    # tracker_names = [f.name for f in os.scandir(tracking_results_dir) if f.is_dir()]
+    # print(tracker_names)
     tracker_names = [
-        "vptracker"
+        "001_qwen3vl_2b_1m_pool",
+        "002_qwen3vl_2b_vp_ib09_1m_pool",
+        "001_qwen3vl_4b_1m_pool",
+        "002_qwen3vl_4b_vp_ib09_1m_pool",
     ]
     if dataset_name == "tnl2k":
         dataset = TNL2KDataset()
+    elif dataset_name == "otb":
+        dataset = OTBDataset()
     elif dataset_name == "tnllt":
         dataset = TNLLTDataset()
     print_results(

@@ -3,21 +3,24 @@ import torch
 import os
 
 
-class TNL2KDataset(torch.utils.data.Dataset[dict[str, Any]]):
+class LaSOTDataset(torch.utils.data.Dataset[dict[str, Any]]):
     def __init__(
         self,
-        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPTrack/data/tnl2k/test",
+        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPTrack/data/LaSOTBenchmark",
         finished_videos=[],
         seg_index=None,
         seg_total=1,
         debug=False,
     ):
-        self.dataset_name = "tnl2k"
+        self.dataset_name = "lasot"
         self.root_dir = root_dir
         # 获取所有的视频名称
-        # Deterministic ordering keeps independently scheduled shards stable
-        # when multiple sequences have the same number of frames.
-        self.video_names = sorted(os.listdir(root_dir))
+        self.class_names = os.listdir(root_dir)
+        self.video_names = []
+        for class_name in self.class_names:
+            class_dir = os.path.join(root_dir, class_name)
+            video_names_in_class = os.listdir(class_dir)
+            self.video_names.extend(video_names_in_class)
         # 过滤掉已经跑完的视频
         self.video_names = [
             video_name
@@ -43,8 +46,8 @@ class TNL2KDataset(torch.utils.data.Dataset[dict[str, Any]]):
     def _get_image_paths(self, video_names: List[str]) -> Dict[str, List[str]]:
         video_names_to_image_paths = {}
         for video_name in video_names:
-            video_dir = os.path.join(self.root_dir, video_name)
-            img_dir = os.path.join(video_dir, "imgs")
+            video_dir = os.path.join(self.root_dir, video_name.split('-')[0], video_name)
+            img_dir = os.path.join(video_dir, "img")
             image_names = sorted(os.listdir(img_dir))
             video_names_to_image_paths[video_name] = [
                 os.path.join(img_dir, image_name) for image_name in image_names
@@ -53,9 +56,10 @@ class TNL2KDataset(torch.utils.data.Dataset[dict[str, Any]]):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         video_name = self.video_names[idx]
+        class_name = video_name.split('-')[0]
         images_path_list = self.video_names_to_image_paths[video_name]
-        language_path = os.path.join(self.root_dir, video_name, "language.txt")
-        bboxes_path = os.path.join(self.root_dir, video_name, "groundtruth.txt")
+        language_path = os.path.join(self.root_dir, class_name,video_name, "nlp.txt")
+        bboxes_path = os.path.join(self.root_dir, class_name, video_name, "groundtruth.txt")
         with open(language_path, "r") as f:
             language = f.read()
         with open(bboxes_path, "r") as f:
@@ -76,8 +80,8 @@ class TNL2KDataset(torch.utils.data.Dataset[dict[str, Any]]):
 
 
 if __name__ == "__main__":
-    dataset = TNL2KDataset(
-        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPTrack/data/tnl2k",
+    dataset = LaSOTDataset(
+        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPTrack/data/LaSOTBenchmark",
         finished_videos=["CartoonXiYouJi_video_03"],
     )
     for i in range(len(dataset)):

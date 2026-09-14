@@ -1,105 +1,46 @@
-# VPTracker: Global Vision-Language Tracking via Visual Prompt and MLLM
+# VPTracker
 
-[![hf_paper](https://img.shields.io/badge/🤗-Paper%20In%20HF-red.svg)]((https://huggingface.co/papers/2512.22799))
-[![arXiv](https://img.shields.io/badge/Arxiv-2512.22799-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2512.22799)
-[![Python](https://img.shields.io/badge/Python-3.9-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.5.1-red.svg)](https://pytorch.org/)
-[![Transformers](https://img.shields.io/badge/Transformers-4.37.2-green.svg)](https://huggingface.co/docs/transformers/)
+VPTracker is a global vision-language tracker that uses location-aware visual prompts with a multimodal language model. The current released checkpoint is experiment **069**, a full-parameter fine-tune of **Qwen3.5-2B**.
 
-<img src="assets/VPTracker.jpg" width="800">
+This repository contains dataset conversion, training launchers, inference, evaluation, and reward plugins. Large datasets, checkpoints, and generated results are excluded from Git. The 069 model is published at [jcwang0602/VPTracker](https://huggingface.co/jcwang0602/VPTracker).
 
-## 🚀 Quick Start
+## Installation
 
-### Installation
+Use Python 3.10 or newer with a CUDA-compatible PyTorch build. Install the exact upstream ms-swift release recorded in [`third_party/ms_swift.lock.json`](third_party/ms_swift.lock.json), then project dependencies:
 
 ```bash
-conda create -n vptrack python==3.10
-conda activate vptrack
-
-cd ms-swift
-conda install -c conda-forge pyarrow sentencepiece
-pip install -e .
-pip install "sglang[all]" -U
-pip install "vllm>=0.5.1" "transformers<4.55" "trl<0.21" -U
-pip install "lmdeploy>=0.5" -U
-pip install autoawq -U --no-deps
-pip install auto_gptq optimum bitsandbytes "gradio<5.33" -U
-pip install git+https://github.com/modelscope/ms-swift.git
-pip install timm -U
-pip install "deepspeed" -U
-pip install flash-attn==2.7.4.post1 --no-build-isolation
-
-conda install av -c conda-forge
-pip install qwen_vl_utils qwen_omni_utils decord librosa icecream soundfile -U
-pip install liger_kernel nvitop pre-commit math_verify py-spy -U
-
+git clone --branch v4.5.3 --depth 1 https://github.com/modelscope/ms-swift.git
+python -m pip install -e ms-swift
+python -m pip install -r requirements-vptrack.txt
 ```
 
-### Data Preparation
-Datasets: [TNL2K](https://github.com/wangxiao5791509/TNL2K_evaluation_toolkit), [TNLLT](https://github.com/Event-AHU/Open_VLTrack)
+Do not install a second, unpinned copy of ms-swift after the editable install. Qwen3.5 loading requires a recent Transformers build; the old `transformers<4.55` constraint has been removed.
 
-```angular2html
-|-- data
-│   ├── tnl2k
-│   │   ├──test
-│   │   |   ├──advSamp_Baseball_game_002-Done
-│   │   |   └──...
-│   │   └──train
-│   │       ├──Arrow_Video_ZZ04_done
-│   │       └──...
-│   └── tnllt
-│       ├──JE_Assian_ship_v01
-│       └──...
-```
-### Data PreParation
+## Model and data paths
+
+Download the checkpoint from Hugging Face, or point scripts at a local checkpoint. Training and evaluation scripts use the repository root by default and accept explicit dataset/checkpoint arguments where applicable. Dataset directories (`data/`), model directories (`models/`), and generated outputs remain ignored by `.gitignore`.
+
+The released checkpoint was trained with seed 42 and records ms-swift `4.4.0.dev0` in its training metadata. The repository records upstream ms-swift v4.5.3 for maintenance and future runs; perform a loading smoke test before reproducing old metrics.
+
+## Quick inference
 
 ```bash
-bash data_preparation.sh
+VPTRACK_MODEL=jcwang0602/VPTracker python demo_vllm.py
 ```
 
-### Model Training
+For dataset evaluation, see `evaluation/infer_tracking_qwen_vlt.py` and scripts under `evaluation/`. For training launchers, see `train_scripts/`.
 
-```bash
-bash train.sh
-```
+## License and citation
 
-### Model Testing
+VPTracker code is released under the license in [`LICENSE`](LICENSE). ms-swift is an independent Apache-2.0 project; its source and notices are obtained from the upstream release linked above.
 
-```bash
-bash infer.sh
-```
-
-## 📦 Checkpoints
-
-You can download it from HuggingFace:
-[VPTracker](https://huggingface.co/jcwang0602/VPTracker)
-
-
-## 👀 Visualization
-<img src="assets/Results.jpg" width="800">
-
-
-## 🙏 Acknowledgments
-This code is developed on the top of [ms-swift](https://github.com/modelscope/ms-swift)
-
-## ✉️ Contact
-
-Email: jcwang@stu.ecnu.edu.cn. Any kind discussions are welcomed!
-
----
-
-## 📖 Citation
-If our work is useful for your research, please consider cite:
-```
+```bibtex
 @misc{wang2025vptrackerglobalvisionlanguagetracking,
-      title={VPTracker: Global Vision-Language Tracking via Visual Prompt and MLLM}, 
-      author={Jingchao Wang and Kaiwen Zhou and Zhijian Wu and Kunhua Ji and Dingjiang Huang and Yefeng Zheng},
-      year={2025},
-      eprint={2512.22799},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2512.22799}, 
+  title={VPTracker: Global Vision-Language Tracking via Visual Prompt and MLLM},
+  author={Jingchao Wang and Kaiwen Zhou and Zhijian Wu and Kunhua Ji and Dingjiang Huang and Yefeng Zheng},
+  year={2025},
+  eprint={2512.22799},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV}
 }
 ```
-<!-- ## ✨ Star History
-[![Star History Chart](https://api.star-history.com/svg?repos=jcwang0602/MLLMSeg&type=Date)](https://star-history.com/#jcwang0602/MLLMSeg&Date) -->
