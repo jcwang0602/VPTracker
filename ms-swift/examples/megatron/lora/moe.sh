@@ -3,13 +3,11 @@ PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' \
 NPROC_PER_NODE=2 \
 CUDA_VISIBLE_DEVICES=0,1 \
 megatron sft \
-    --model Qwen/Qwen3-30B-A3B \
-    --save_safetensors true \
-    --merge_lora false \
+    --load Qwen3-30B-A3B-mcore \
     --dataset 'swift/Qwen3-SFT-Mixin#2000' \
               'swift/self-cognition:empty_think#600' \
     --loss_scale ignore_empty_think \
-    --tuner_type lora \
+    --train_type lora \
     --lora_rank 8 \
     --lora_alpha 32 \
     --target_modules all-linear \
@@ -24,17 +22,17 @@ megatron sft \
     --recompute_granularity full \
     --recompute_method uniform \
     --recompute_num_layers 1 \
-    --num_train_epochs 1 \
+    --max_epochs 1 \
     --finetune true \
     --cross_entropy_loss_fusion true \
     --lr 1e-4 \
     --lr_warmup_fraction 0.05 \
     --min_lr 1e-5 \
-    --output_dir megatron_output/Qwen3-30B-A3B \
-    --eval_steps 200 \
-    --save_steps 200 \
+    --save megatron_output/Qwen3-30B-A3B \
+    --eval_interval 200 \
+    --save_interval 200 \
     --max_length 2048 \
-    --dataloader_num_workers 8 \
+    --num_workers 8 \
     --dataset_num_proc 8 \
     --no_save_optim true \
     --no_save_rng true \

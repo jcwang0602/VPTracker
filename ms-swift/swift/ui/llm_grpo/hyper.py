@@ -1,5 +1,5 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-from ..llm_train import Hyper
+# Copyright (c) Alibaba, Inc. and its affiliates.
+from swift.ui.llm_train.hyper import Hyper
 
 
 class GRPOHyper(Hyper):

@@ -1,18 +1,18 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from functools import partial
 from typing import Type
 
-from swift.arguments import DeployArguments
-from swift.model import ModelType, get_model_list
-from swift.template import TEMPLATE_MAPPING
-from ..base import BaseUI
-from .generate import Generate
+import gradio as gr
+
+from swift.llm import TEMPLATE_MAPPING, DeployArguments, ModelType
+from swift.llm.model.register import get_all_models
+from swift.ui.base import BaseUI
+from swift.ui.llm_infer.generate import Generate
 
 
 class Model(BaseUI):
 
-    group = 'llm_infer'
+    llm_train = 'llm_infer'
 
     sub_ui = [Generate]
 
@@ -59,20 +59,18 @@ class Model(BaseUI):
                 'en': 'Merge LoRA'
             },
             'info': {
-                'zh': '仅在`tuner_type=lora`时可用',
-                'en': 'Only available when `tuner_type=lora`'
+                'zh': '仅在`sft_type=lora`时可用',
+                'en': 'Only available when `sft_type=lora`'
             }
         },
-        'adapters': {
+        'lora_modules': {
             'label': {
-                'zh': 'adapter id或路径',
-                'en': 'adapter id/path'
+                'zh': '外部LoRA模块',
+                'en': 'More LoRA modules'
             },
             'info': {
-                'zh':
-                '只有一个lora模块时填adapter路径或`name=/path`；多个lora模块时填键值对：`name1=/path1 name2=/path2`',
-                'en': ('Single LoRA: Use path or name=/path. '
-                       'Multiple LoRAs: Use key-value pairs, e.g., name1=/path1 name2=/path2.')
+                'zh': '空格分割的name=/path1/path2键值对',
+                'en': 'name=/path1/path2 split by blanks'
             }
         },
         'more_params': {
@@ -105,7 +103,7 @@ class Model(BaseUI):
             gr.Dropdown(
                 elem_id='model',
                 scale=20,
-                choices=get_model_list(),
+                choices=get_all_models(),
                 value='Qwen/Qwen2.5-7B-Instruct',
                 allow_custom_value=True)
             gr.Dropdown(elem_id='model_type', choices=ModelType.get_model_name_list(), scale=20)
@@ -113,11 +111,11 @@ class Model(BaseUI):
             gr.Checkbox(elem_id='merge_lora', scale=4)
             gr.Button(elem_id='reset', scale=2)
         with gr.Row():
-            gr.Dropdown(elem_id='infer_backend', value='transformers', scale=5)
+            gr.Dropdown(elem_id='infer_backend', value='pt', scale=5)
         Generate.set_lang(cls.lang)
         Generate.build_ui(base_tab)
         with gr.Row(equal_height=True):
-            gr.Textbox(elem_id='adapters', lines=1, is_list=True, scale=40)
+            gr.Textbox(elem_id='lora_modules', lines=1, is_list=True, scale=40)
             gr.Textbox(elem_id='more_params', lines=1, scale=20)
             gr.Button(elem_id='load_checkpoint', scale=2, variant='primary')
 

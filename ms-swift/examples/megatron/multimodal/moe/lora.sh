@@ -3,12 +3,10 @@ PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' \
 NPROC_PER_NODE=2 \
 CUDA_VISIBLE_DEVICES=0,1 \
 megatron sft \
-    --model OpenGVLab/InternVL3_5-30B-A3B \
-    --save_safetensors true \
-    --merge_lora false \
+    --load InternVL3_5-30B-A3B-mcore \
     --dataset 'AI-ModelScope/LaTeX_OCR:human_handwrite#5000' \
     --load_from_cache_file true \
-    --tuner_type lora \
+    --train_type lora \
     --lora_rank 8 \
     --lora_alpha 32 \
     --target_modules all-linear \
@@ -33,12 +31,13 @@ megatron sft \
     --lr 1e-4 \
     --lr_warmup_fraction 0.05 \
     --min_lr 1e-5 \
-    --num_train_epochs 1 \
-    --output_dir megatron_output/InternVL3_5-30B-A3B \
-    --eval_steps 200 \
-    --save_steps 200 \
+    --max_epochs 1 \
+    --save megatron_output/InternVL3_5-30B-A3B \
+    --eval_interval 200 \
+    --save_interval 200 \
+    --vit_gradient_checkpointing true \
     --max_length 2048 \
-    --dataloader_num_workers 8 \
+    --num_workers 8 \
     --dataset_num_proc 8 \
     --no_save_optim true \
     --no_save_rng true \

@@ -1,13 +1,12 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
 
 
 def test_channel():
-    from swift import SftArguments, sft_main
+    from swift.llm import sft_main, TrainArguments
     sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2.5-7B-Instruct',
             dataset=['channel.jsonl#1000'],
             split_dataset_ratio=0.01,

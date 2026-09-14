@@ -1,16 +1,18 @@
+nproc_per_node=4
 # 4*47G
-# losses: swift/loss
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-NPROC_PER_NODE=4 \
+# losses: plugin/loss.py
+# only support --padding_side left
+NPROC_PER_NODE=$nproc_per_node \
 swift sft \
     --model Qwen/Qwen3-Reranker-4B \
     --task_type generative_reranker \
-    --loss_type pointwise_reranker \
-    --tuner_type full \
+    --loss_type generative_reranker \
+    --train_type full \
     --dataset MTEB/scidocs-reranking \
     --load_from_cache_file true \
     --split_dataset_ratio 0.05 \
     --eval_strategy steps \
+    --padding_side left \
     --output_dir output \
     --eval_steps 100 \
     --num_train_epochs 1 \
@@ -21,5 +23,4 @@ swift sft \
     --dataset_num_proc 8 \
     --learning_rate 6e-6 \
     --label_names labels \
-    --deepspeed zero2 \
     --dataloader_drop_last true

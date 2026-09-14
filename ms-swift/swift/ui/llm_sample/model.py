@@ -1,12 +1,12 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from functools import partial
 from typing import Type
 
-from swift.arguments import SamplingArguments
-from swift.model import ModelType, get_model_list
-from swift.template import TEMPLATE_MAPPING
-from ..base import BaseUI
+import gradio as gr
+
+from swift.llm import TEMPLATE_MAPPING, ModelType, SamplingArguments
+from swift.llm.model.register import get_all_models
+from swift.ui.base import BaseUI
 
 
 class Model(BaseUI):
@@ -84,7 +84,7 @@ class Model(BaseUI):
             gr.Dropdown(
                 elem_id='model',
                 scale=20,
-                choices=get_model_list(),
+                choices=get_all_models(),
                 value='Qwen/Qwen2.5-7B-Instruct',
                 allow_custom_value=True)
             gr.Dropdown(elem_id='model_type', choices=ModelType.get_model_name_list(), scale=20)

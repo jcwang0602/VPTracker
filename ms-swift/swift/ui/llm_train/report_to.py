@@ -1,8 +1,9 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from typing import Type
 
-from ..base import BaseUI
+import gradio as gr
+
+from swift.ui.base import BaseUI
 
 
 class ReportTo(BaseUI):
@@ -46,6 +47,18 @@ class ReportTo(BaseUI):
                 'en': 'Experiment of SwanLab'
             },
         },
+        'swanlab_lark_webhook_url': {
+            'label': {
+                'zh': 'SwanLab飞书Webhook地址',
+                'en': 'Webhook URL of SwanLab Lark Callback'
+            },
+        },
+        'swanlab_lark_secret': {
+            'label': {
+                'zh': 'SwanLab飞书Secret',
+                'en': 'Secret of SwanLab Lark Callback'
+            },
+        },
         'swanlab_mode': {
             'label': {
                 'zh': 'SwanLab工作模式',
@@ -68,6 +81,9 @@ class ReportTo(BaseUI):
                         scale=20)
                     gr.Textbox(elem_id='swanlab_token', lines=1, scale=20)
                     gr.Textbox(elem_id='swanlab_project', lines=1, scale=20)
+                with gr.Row():
+                    gr.Textbox(elem_id='swanlab_lark_webhook_url', lines=1, scale=20)
+                    gr.Textbox(elem_id='swanlab_lark_secret', lines=1, scale=20)
                 with gr.Row():
                     gr.Textbox(elem_id='swanlab_workspace', lines=1, scale=20)
                     gr.Textbox(elem_id='swanlab_exp_name', lines=1, scale=20)

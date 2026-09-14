@@ -1,12 +1,10 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
 
 
 def test_engine():
-    from swift.dataset import load_dataset
-    from swift.infer_engine import RequestConfig, SglangEngine
+    from swift.llm import SglangEngine, load_dataset, RequestConfig
     dataset = load_dataset('AI-ModelScope/alpaca-gpt4-data-zh#20')[0]
     engine = SglangEngine('Qwen/Qwen2.5-0.5B-Instruct')
     request_config = RequestConfig(max_tokens=1024)
@@ -19,8 +17,7 @@ def test_engine():
 
 
 def test_engine_stream():
-    from swift.dataset import load_dataset
-    from swift.infer_engine import RequestConfig, SglangEngine
+    from swift.llm import SglangEngine, load_dataset, RequestConfig
     dataset = load_dataset('AI-ModelScope/alpaca-gpt4-data-zh#1')[0]
     engine = SglangEngine('Qwen/Qwen2.5-0.5B-Instruct')
     request_config = RequestConfig(max_tokens=1024, stream=True)
@@ -32,13 +29,13 @@ def test_engine_stream():
 
 
 def test_infer():
-    from swift import InferArguments, infer_main
+    from swift.llm import infer_main, InferArguments
     infer_main(
         InferArguments(model='Qwen/Qwen2.5-0.5B-Instruct', stream=True, infer_backend='sglang', max_new_tokens=2048))
 
 
 def test_eval():
-    from swift import EvalArguments, eval_main
+    from swift.llm import EvalArguments, eval_main
     eval_main(
         EvalArguments(
             model='Qwen/Qwen2-7B-Instruct',

@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import importlib.util
 import inspect
 from dataclasses import asdict
@@ -16,15 +16,14 @@ class TrainerFactory:
         'embedding': 'swift.trainers.EmbeddingTrainer',
         'reranker': 'swift.trainers.RerankerTrainer',
         'generative_reranker': 'swift.trainers.RerankerTrainer',
-        # rlhf
-        'dpo': 'swift.rlhf_trainers.DPOTrainer',
-        'orpo': 'swift.rlhf_trainers.ORPOTrainer',
-        'kto': 'swift.rlhf_trainers.KTOTrainer',
-        'cpo': 'swift.rlhf_trainers.CPOTrainer',
-        'rm': 'swift.rlhf_trainers.RewardTrainer',
-        'ppo': 'swift.rlhf_trainers.PPOTrainer',
-        'grpo': 'swift.rlhf_trainers.GRPOTrainer',
-        'gkd': 'swift.rlhf_trainers.GKDTrainer',
+        'dpo': 'swift.trainers.DPOTrainer',
+        'orpo': 'swift.trainers.ORPOTrainer',
+        'kto': 'swift.trainers.KTOTrainer',
+        'cpo': 'swift.trainers.CPOTrainer',
+        'rm': 'swift.trainers.RewardTrainer',
+        'ppo': 'swift.trainers.PPOTrainer',
+        'grpo': 'swift.trainers.GRPOTrainer',
+        'gkd': 'swift.trainers.GKDTrainer',
     }
 
     TRAINING_ARGS_MAPPING = {
@@ -33,15 +32,14 @@ class TrainerFactory:
         'embedding': 'swift.trainers.TrainingArguments',
         'reranker': 'swift.trainers.TrainingArguments',
         'generative_reranker': 'swift.trainers.TrainingArguments',
-        # rlhf
-        'dpo': 'swift.rlhf_trainers.DPOConfig',
-        'orpo': 'swift.rlhf_trainers.ORPOConfig',
-        'kto': 'swift.rlhf_trainers.KTOConfig',
-        'cpo': 'swift.rlhf_trainers.CPOConfig',
-        'rm': 'swift.rlhf_trainers.RewardConfig',
-        'ppo': 'swift.rlhf_trainers.PPOConfig',
-        'grpo': 'swift.rlhf_trainers.GRPOConfig',
-        'gkd': 'swift.rlhf_trainers.GKDConfig',
+        'dpo': 'swift.trainers.DPOConfig',
+        'orpo': 'swift.trainers.ORPOConfig',
+        'kto': 'swift.trainers.KTOConfig',
+        'cpo': 'swift.trainers.CPOConfig',
+        'rm': 'swift.trainers.RewardConfig',
+        'ppo': 'swift.trainers.PPOConfig',
+        'grpo': 'swift.trainers.GRPOConfig',
+        'gkd': 'swift.trainers.GKDConfig',
     }
 
     @staticmethod

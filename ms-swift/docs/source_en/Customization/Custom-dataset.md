@@ -3,17 +3,17 @@
 There are three methods for accessing custom datasets, each offering progressively greater control over preprocessing functions but also increasing in complexity. For example, Solution 1 is the most convenient but offers the least control over preprocessing functions, requiring prior conversion of the dataset into a specific format:
 
 1. **Recommended**: Directly use the command line parameter to access the dataset with `--dataset <dataset_path1> <dataset_path2>`. This will use `AutoPreprocessor` to convert your dataset into a standard format (supporting four dataset formats; see the introduction to AutoPreprocessor below). You can use `--columns` to transform column names. The supported input formats include csv, json, jsonl, txt, and folders (e.g. git clone open-source datasets). This solution does not require modifying `dataset_info.json` and is suitable for users new to ms-swift. The following two solutions are suitable for developers looking to extend ms-swift.
-2. Add the dataset to `dataset_info.json`, which you can refer to in the built-in [dataset_info.json](https://github.com/modelscope/ms-swift/blob/main/swift/dataset/data/dataset_info.json) of ms-swift. This solution also uses AutoPreprocessor to convert the dataset to a standard format. `dataset_info.json` is a list of metadata for datasets, and one of the fields ms_dataset_id/hf_dataset_id/dataset_path must be filled. Column name transformation can be done through the `columns` field. Datasets added to `dataset_info.json` or registered ones will automatically generate [supported dataset documentation](https://swift.readthedocs.io/en/latest/Instruction/Supported-models-and-datasets.html) when running [run_dataset_info.py](https://github.com/modelscope/ms-swift/blob/main/scripts/utils/run_dataset_info.py). In addition, you can use the external `dataset_info.json` approach by parsing the JSON file with `--custom_dataset_info xxx.json` (to facilitate users who prefer `pip install` over `git clone`), and then specify `--dataset <dataset_id/dataset_dir/dataset_path>`.
-3. Manually register the dataset to have the most flexible customization capability for preprocessing functions, allowing the use of functions to preprocess datasets, but it is more difficult. You can refer to the [built-in datasets](https://github.com/modelscope/ms-swift/blob/main/swift/dataset/dataset/llm.py) or [examples](https://github.com/modelscope/ms-swift/blob/main/examples/custom). You can specify `--external_plugins xxx.py` to parse external registration content (convenient for users who use pip install instead of git clone).
+2. Add the dataset to `dataset_info.json`, which you can refer to in the built-in [dataset_info.json](https://github.com/modelscope/ms-swift/blob/main/swift/llm/dataset/data/dataset_info.json) of ms-swift. This solution also uses AutoPreprocessor to convert the dataset to a standard format. `dataset_info.json` is a list of metadata for datasets, and one of the fields ms_dataset_id/hf_dataset_id/dataset_path must be filled. Column name transformation can be done through the `columns` field. Datasets added to `dataset_info.json` or registered ones will automatically generate [supported dataset documentation](https://swift.readthedocs.io/en/latest/Instruction/Supported-models-and-datasets.html) when running [run_dataset_info.py](https://github.com/modelscope/ms-swift/blob/main/scripts/utils/run_dataset_info.py). In addition, you can use the external `dataset_info.json` approach by parsing the JSON file with `--custom_dataset_info xxx.json` (to facilitate users who prefer `pip install` over `git clone`), and then specify `--dataset <dataset_id/dataset_dir/dataset_path>`.
+3. Manually register the dataset to have the most flexible customization capability for preprocessing functions, allowing the use of functions to preprocess datasets, but it is more difficult. You can refer to the [built-in datasets](https://github.com/modelscope/ms-swift/blob/main/swift/llm/dataset/dataset/llm.py) or [examples](https://github.com/modelscope/ms-swift/blob/main/examples/custom). You can specify `--custom_register_path xxx.py` to parse external registration content (convenient for users who use pip install instead of git clone).
    - Solutions one and two leverage solution three under the hood, where the registration process occurs automatically.
 
 The following is an introduction to the dataset formats that `AutoPreprocessor` can handle:
 
 The standard dataset format for ms-swift accepts keys such as: 'messages', 'rejected_response', 'label', 'images', 'videos', 'audios', 'tools', and 'objects'. Among these, 'messages' is a required key. 'rejected_response' is used for DPO and other RLHF training, 'label' is used for KTO training and classification model training. The keys 'images', 'videos', and 'audios' are used to store paths or URLs for multimodal data, 'tools' is used for Agent tasks, and 'objects' is used for grounding tasks.
 
-There are three core preprocessors in ms-swift: `MessagesPreprocessor`, `AlpacaPreprocessor`, and `ResponsePreprocessor`. `MessagesPreprocessor` is used to convert datasets in the messages and sharegpt format into the standard format. It also automatically normalizes OpenAI `tool_calls` and Anthropic `tool_use`/`tool_result`/`image` content blocks. The provider-specific `OpenAIMessagesPreprocessor` and `AnthropicMessagesPreprocessor` classes can be used when explicit format selection is preferred. `AlpacaPreprocessor` converts datasets in the alpaca format, while `ResponsePreprocessor` converts datasets in the query/response format. `AutoPreprocessor` automatically selects the appropriate preprocessor for the task.
+There are three core preprocessors in ms-swift: `MessagesPreprocessor`, `AlpacaPreprocessor`, and `ResponsePreprocessor`. `MessagesPreprocessor` is used to convert datasets in the messages and sharegpt format into the standard format. `AlpacaPreprocessor` converts datasets in the alpaca format, while `ResponsePreprocessor` converts datasets in the query/response format. `AutoPreprocessor` automatically selects the appropriate preprocessor for the task.
 
-The following formats will all be converted into the `messages` field of the ms-swift standard format under the processing of `AutoPreprocessor`, meaning they can all be directly used with `--dataset <dataset-path>`:
+The following four formats will all be converted into the `messages` field of the ms-swift standard format under the processing of `AutoPreprocessor`, meaning they can all be directly used with `--dataset <dataset-path>`:
 
 Messages format (standard format):
 ```jsonl
@@ -26,33 +26,11 @@ ShareGPT format:
 {"system": "<system>", "conversation": [{"human": "<query1>", "assistant": "<response1>"}, {"human": "<query2>", "assistant": "<response2>"}]}
 ```
 
-OpenAI tool-call format:
-```jsonl
-{"messages": [{"role": "user", "content": "How is the weather?"}, {"role": "assistant", "content": null, "tool_calls": [{"type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}}]}, {"role": "tool", "content": "Sunny"}]}
-```
-
-OpenAI Chat Completions multimodal tool-call format:
-```jsonl
-{"messages": [{"role": "user", "content": [{"type": "text", "text": "Compare these images."}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,{base64_encoded}"}}, {"type": "image_url", "image_url": "https://example.com/input.png"}]}, {"role": "assistant", "content": [{"type": "text", "text": "I will inspect them."}], "tool_calls": [{"type": "function", "function": {"name": "inspect_images", "arguments": "{\"detail\":\"high\"}"}}]}]}
-```
-- OpenAI `image_url` blocks are converted to `<image>` placeholders and the top-level `images` field in their original order. This example uses the Chat Completions format; Responses API `input_text` and `input_image` blocks use a different schema.
-
-Anthropic tool-use format:
-```jsonl
-{"messages": [{"role": "assistant", "content": [{"type": "text", "text": "I will check."}, {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "Beijing"}}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "Sunny"}]}]}
-```
-
-Anthropic multimodal tool-use format:
-```jsonl
-{"messages": [{"role": "user", "content": [{"type": "text", "text": "What is in this image?"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "{base64_encoded}"}}]}, {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "inspect_image", "input": {}}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/result.png"}}, {"type": "text", "text": "A sunny beach."}]}]}]}
-```
-- Anthropic base64 and URL image sources are converted to `<image>` placeholders and the top-level `images` field in their original order.
-
 Query-Response format:
 ```jsonl
 {"system": "<system>", "query": "<query2>", "response": "<response2>", "history": [["<query1>", "<response1>"]]}
 ```
-Note: The following fields will be automatically converted to the corresponding system, query, and response fields. (The 'solution' field will be retained)
+Note: The following fields will be automatically converted to the corresponding system, query, and response fields.
 - system: 'system', 'system_prompt'.
 - query: 'query', 'prompt', 'input', 'instruction', 'question', 'problem'.
 - response: 'response', 'answer', 'output', 'targets', 'target', 'answer_key', 'answers', 'solution', 'text', 'completion', 'content'.
@@ -83,48 +61,10 @@ The following outlines the standard dataset format for ms-swift, where the "syst
 {"messages": [{"role": "system", "content": "You are a useful and harmless math calculator"}, {"role": "user", "content": "What is 1 + 1?"}, {"role": "assistant", "content": "It equals 2"}, {"role": "user", "content": "What about adding 1?"}, {"role": "assistant", "content": "It equals 3"}]}
 ```
 
-- You can add a `"loss"` field to control whether the loss is computed for the corresponding model response ("role" is "assistant"). This field defaults to `None`. If `"loss"` is set to `true`, the loss will be computed for the corresponding content (the specific `loss_scale` is still determined by `--loss_scale`); if `"loss"` is set to `false`, the loss will not be computed for the corresponding content. Note that this field only takes effect for parts where `"role"` is `"assistant"`. This field takes priority over the basic strategies of the `--loss_scale` command-line argument (i.e., `'default'`, `'last_round'`, `'all'`). For example, when `loss_scale` is set to `'default+ignore_empty_think'`, the `"loss"` field takes priority over `'default'`, but `'ignore_empty_think'` still takes effect.
-- You can add a `"loss_scale"` field to control the `loss_scale` for the corresponding model response ("role" is "assistant"). (ms-swift >= 4.2.0) Defaults to `None`. This field takes priority over other strategy components of the `--loss_scale` command-line argument, such as `'ignore_empty_think'`, `'hermes'`, etc. If any value greater than `1` appears in `loss_scale`, you need to additionally set `--is_binary_loss_scale false`.
+- You can control whether the loss is computed for specific parts of the model's response by adding the `"loss"` field (requires ms-swift >= 3.8). This field defaults to `None`. If `"loss"` is set to `true`, the corresponding content will contribute to the loss calculation (equivalent to a `loss_scale` of 1). If `"loss"` is set to `false`, the corresponding content will be excluded from loss computation. Note that this feature only takes effect for messages where `"role"` is `"assistant"`, and it has higher priority than the command-line argument `--loss_scale`. Example data format:
 
 ```jsonl
 {"messages": [{"role": "user", "content": "Hello!"}, {"role": "assistant", "content": "Hi, how can I help you?", "loss": false}, {"role": "user", "content": "What is 1+1?"}, {"role": "assistant", "content": "It equals 2", "loss": true}]}
-{"messages": [{"role": "user", "content": "hello!"}, {"role": "assistant", "content": "<think>\n...\n</think>\n", "loss_scale": 1.0}, {"role": "assistant", "content": "hi!", "loss_scale": 2.0}, {"role": "user", "content": "1+1=?"}, {"role": "assistant", "content": "<think>\n...\n</think>\n1+1=3", "loss": false}]}
-```
-
-Use the following script to test:
-
-```python
-from swift import get_processor, get_template
-
-data = {"messages": [
-    {"role": "user", "content": "hello!"},
-    {"role": "assistant", "content": "<think>\n...\n</think>\n", "loss_scale": 1.},
-    {"role": "assistant", "content": "hi!", "loss_scale": 2.},
-    {"role": "user", "content": "1+1=?"},
-    {"role": "assistant", "content": "<think>\n...\n</think>\n1+1=3", "loss": False},
-]}
-
-template = get_template(get_processor('Qwen/Qwen3-8B'), loss_scale='default+ignore_empty_think',
-                        is_binary_loss_scale=False)
-template.set_mode('train')
-inputs = template.encode(data)
-
-print(template.safe_decode(inputs['labels']))
-print(inputs['loss_scale'])
-```
-
-Note: If you set "loss"/"loss_scale" on consecutive "tool_call" messages in the messages list, only the configuration of the first "tool_call" takes effect. For example:
-```jsonl
-{"messages": [..., {"role": "tool_call", "content": "{\"name\": \"realtime_aqi\", \"arguments\": {\"city\": \"Beijing\"}}", "loss": false}, {"role": "tool_call", "content": "{\"name\": \"realtime_aqi\", \"arguments\": {\"city\": \"Shanghai\"}}"}, ...]}
-```
-
-- The "chat_template_kwargs" field (requires ms-swift>=4.3.0) allows you to control template multimodal parameters such as min_pixels, max_pixels, fps, as well as parameters like enable_thinking (during inference) at the **sample level** by passing this field in the dataset. The following parameters are supported by different models:
-  - Among them, "enable_thinking", "preserve_thinking" and "response_prefix" are supported by all models (takes effect during inference); the "max_pixels" parameter is supported by all multimodal models.
-  - Qwen series multimodal models: parameters supported by qwen_vl_utils/qwen_omni_utils such as min_pixels, max_pixels, fps, etc.
-
-```jsonl
-{"messages": [{"role": "user", "content": "<image>What is this"}, {"role": "assistant", "content": "This is a rabbit", "loss": false}], "chat_template_kwargs": {"max_pixels": 1048576}}
-{"messages": [{"role": "user", "content": "who are you?"}], "chat_template_kwargs": {"enable_thinking": false}}
 ```
 
 #### Channel Loss
@@ -148,8 +88,7 @@ The format of multimodal data should follow the specifications in [Multimodal Da
 
 > Note: RM additionally supports the margin column. For details, refer to the [RM documentation](../Instruction/RLHF.md#rm).
 
-Sure, you can also directly use `rejected_messages` instead of only providing `rejected_response` / `rejected_images`, which offers greater flexibility (e.g., for multimodal or agent scenarios). If you use "rejected_messages", then in multimodal scenarios you must also provide "rejected_images", "rejected_audios", "rejected_videos", etc.; in Agent scenarios you must also provide "rejected_tools", etc. An example of the multimodal data format is as follows:
-- If using `rejected_response`, the default values for 'rejected_images/rejected_audios/rejected_videos/rejected_tools' are 'images/audios/videos/tools'; if using `rejected_messages`, they need to be passed in additionally.
+Sure, you can also directly use `rejected_messages` instead of only providing `rejected_response` / `rejected_images` (requires ms-swift>=3.8), which offers greater flexibility (e.g., for multimodal or agent scenarios). If you use "rejected_messages", then in multimodal scenarios you must also provide "rejected_images", "rejected_audios", "rejected_videos", etc.; in Agent scenarios you must also provide "rejected_tools", etc. An example of the multimodal data format is as follows:
 
 ```jsonl
 {"messages": [{"role": "user", "content": "<image>What is this?"}, {"role": "assistant", "content": "This is a kitten."}], "images": ["kitten.png"], "rejected_messages": [{"role": "user", "content": "<image>What is this?"}, {"role": "assistant", "content": "This is a puppy."}], "rejected_images": ["kitten.png"]}
@@ -161,32 +100,7 @@ The above format is equivalent to:
 ```jsonl
 {"messages": [{"role": "user", "content": "<image>What is this?"}, {"role": "assistant", "content": "This is a kitten."}], "images": ["kitten.png"], "rejected_response": "This is a puppy."}
 {"messages": [{"role": "user", "content": "<image>What is this?"}, {"role": "assistant", "content": "This is a kitten."}], "images": ["kitten.png"], "rejected_images": ["puppy.png"]}
-# Example 1 can also be written as:
-{"messages": [{"role": "user", "content": "<image>What is this?"}, {"role": "assistant", "content": "This is a kitten."}], "images": ["kitten.png"], "rejected_response": [{"role": "assistant", "content": "This is a puppy."}]}
 ```
-
-You can also organize the Agent dataset in the following format:
-
-```jsonl
-# It will find the position of the last user in `messages`, and replace the subsequent content with `rejected_response` to form `rejected_messages`
-{"tools": "[{\"type\": \"function\", \"function\": {\"name\": \"realtime_aqi\", \"description\": \"Weather forecast. Get real-time air quality, including current air quality, PM2.5, and PM10 information.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g., Shanghai\"}}, \"required\": [\"city\"]}}}]", "messages": [{"role": "user", "content": "What is the weather like in Beijing and Shanghai today?"}, {"role": "tool_call", "content": "{\"name\": \"realtime_aqi\", \"arguments\": {\"city\": \"Beijing\"}}"}, {"role": "tool_call", "content": "{\"name\": \"realtime_aqi\", \"arguments\": {\"city\": \"Shanghai\"}}"}, {"role": "tool_response", "content": "{\"city\": \"Beijing\", \"aqi\": \"10\", \"unit\": \"celsius\"}"}, {"role": "tool_response", "content": "{\"city\": \"Shanghai\", \"aqi\": \"72\", \"unit\": \"fahrenheit\"}"}, {"role": "assistant", "content": "According to the weather forecast tool, the air quality index (AQI) in Beijing is 10, which indicates good air quality; whereas in Shanghai, the AQI is 72, indicating mild pollution."}], "rejected_response": [{"role": "assistant", "content": "I don't know."}]}
-```
-
-How to debug:
-
-```python
-from swift import get_processor, get_template
-
-data = {"tools": "[{\"type\": \"function\", \"function\": {\"name\": \"realtime_aqi\", \"description\": \"Weather forecast. Get real-time air quality, including current air quality, PM2.5, and PM10 information.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g., Shanghai\"}}, \"required\": [\"city\"]}}}]", "messages": [{"role": "user", "content": "What is the weather like in Beijing and Shanghai today?"}, {"role": "tool_call", "content": "{\"name\": \"realtime_aqi\", \"arguments\": {\"city\": \"Beijing\"}}"}, {"role": "tool_call", "content": "{\"name\": \"realtime_aqi\", \"arguments\": {\"city\": \"Shanghai\"}}"}, {"role": "tool_response", "content": "{\"city\": \"Beijing\", \"aqi\": \"10\", \"unit\": \"celsius\"}"}, {"role": "tool_response", "content": "{\"city\": \"Shanghai\", \"aqi\": \"72\", \"unit\": \"fahrenheit\"}"}, {"role": "assistant", "content": "According to the weather forecast tool, the air quality index (AQI) in Beijing is 10, which indicates good air quality; whereas in Shanghai, the AQI is 72, indicating mild pollution."}], "rejected_response": [{"role": "assistant", "content": "I don't know."}]}
-
-template = get_template(get_processor('Qwen/Qwen3.5-4B'), loss_scale='last_round')
-template.set_mode('rlhf')  # For details, refer to the `template_mode` parameter description in the command-line documentation.
-inputs = template.encode(data)
-
-print(template.safe_decode(inputs['chosen_labels']))
-print(template.safe_decode(inputs['rejected_labels']))
-```
-
 
 #### KTO
 
@@ -206,12 +120,14 @@ print(template.safe_decode(inputs['rejected_labels']))
 
 #### GKD
 
+If `seq_kd` is not enabled, i.e., the parameter is set to False, the dataset format is as follows (you can use a teacher model to pre-distill the data):
+
 ```jsonl
 {"messages": [{"role": "system", "content": "You are a useful and harmless assistant"}, {"role": "user", "content": "Tell me tomorrow's weather"}, {"role": "assistant", "content": "Tomorrow's weather will be sunny"}]}
 {"messages": [{"role": "system", "content": "You are a useful and harmless math calculator"}, {"role": "user", "content": "What is 1 + 1?"}, {"role": "assistant", "content": "It equals 2"}, {"role": "user", "content": "What about adding 1?"}, {"role": "assistant", "content": "It equals 3"}]}
 ```
 
-When under on-policy training, the final round of the 'assistant' part is not required (the student model generates data during training, the response from dataset will be removed):
+If `seq_kd` is enabled, the final round of the 'assistant' part is not required (the teacher model generates data during training):
 
 ```jsonl
 {"messages": [{"role": "system", "content": "You are a useful and harmless assistant"}, {"role": "user", "content": "Tell me tomorrow's weather"}]}
@@ -257,7 +173,7 @@ Please refer to [Reranker training document](../BestPractices/Reranker.md#datase
 
 ### Multimodal
 
-For multimodal datasets, the format is the same as the aforementioned tasks. The difference lies in the addition of several keys: `images`, `videos`, and `audios`, which represent the URLs or paths (preferably absolute paths) of multimodal resources. The tags `<image>`, `<video>`, and `<audio>` indicate where to insert images, videos, or audio. MS-Swift supports multiple images, videos, and audio files. These special tokens will be replaced during preprocessing, as referenced [here](https://github.com/modelscope/ms-swift/blob/main/swift/template/templates/qwen.py#L198). The four examples below respectively demonstrate the data format for plain text, as well as formats containing image, video, and audio data.
+For multimodal datasets, the format is the same as the aforementioned tasks. The difference lies in the addition of several keys: `images`, `videos`, and `audios`, which represent the URLs or paths (preferably absolute paths) of multimodal resources. The tags `<image>`, `<video>`, and `<audio>` indicate where to insert images, videos, or audio. MS-Swift supports multiple images, videos, and audio files. These special tokens will be replaced during preprocessing, as referenced [here](https://github.com/modelscope/ms-swift/blob/main/swift/llm/template/template/qwen.py#L198). The four examples below respectively demonstrate the data format for plain text, as well as formats containing image, video, and audio data.
 
 
 Pre-training:
@@ -281,7 +197,7 @@ Supervised Fine-tuning:
   - videos: video, videos.
   - audios: audio, audios.
 - If you need to pass base64 data instead of file paths, here are sample examples: `"videos": ['data:video/mp4;base64,{base64_encoded}']`, `"images": ['data:image/jpg;base64,{base64_encoded}']`.
-- If you wish to directly pass in video frames instead of a video file, you can use the following format: `"videos": [["/xxx/x.png", "/xxx/y.png"], ["/xxx/a.png", "/xxx/b.png", "/xxx/c.png"]]`. This format is supported only by certain models, including Qwen2/2.5/3-VL, Qwen2.5/3-Omni, and their derivative models.
+- If you wish to directly pass in video frames instead of a video file, you can use the following format (requires `ms-swift>=3.8.3`): `"videos": [["/xxx/x.png", "/xxx/y.png"], ["/xxx/a.png", "/xxx/b.png", "/xxx/c.png"]]`. This format is supported only by certain models, including Qwen2/2.5/3-VL, Qwen2.5/3-Omni, and their derivative models.
 
 The data format for RLHF and sequence classification of multimodal models can reference the format of pure text large models, with additional fields such as `images` added on top of that.
 
@@ -320,7 +236,7 @@ The format will automatically convert the dataset format to the corresponding mo
 - bbox_type: Optional values are 'real' and 'norm1'. The default is 'real', meaning the bbox represents the actual bounding box value. If set to 'norm1', the bbox is normalized to the range 0~1.
 - image_id: Typically used for multi-image grounding tasks. This parameter only takes effect when bbox_type is 'real', representing which image the bbox corresponds to, used for scaling the bbox. The index starts from 0, and defaults to all being the 0th image. The length of image_id needs to be consistent with the length of bbox. For example: if the length of bbox is 10 and the length of images is 2, then the length of image_id needs to be 10, with values within the set `{0, 1}`.
 
-For Qwen2.5-VL/Qwen3-VL, you can set the environment variable `QWENVL_BBOX_FORMAT='new'` (default is `'legacy'`) to be compatible with the [official cookbook](https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/2d_grounding.ipynb) format. Define your dataset in the following format:
+For Qwen2.5-VL/Qwen3-VL, you can set the environment variable `QWENVL_BBOX_FORMAT='new'` (default is `'legacy'`, requires "ms-swift>=3.9.1") to be compatible with the [official cookbook](https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/2d_grounding.ipynb) format. Define your dataset in the following format:
 ```jsonl
 {"messages": [{"role": "user", "content": "<image>Locate the <ref-object> in the image"}, {"role": "assistant", "content": "[\n\t{\"bbox_2d\": <bbox>, \"label\": \"<ref-object>\"},\n\t{\"bbox_2d\": <bbox>, \"label\": \"<ref-object>\"}\n]"}], "images": ["cat.png"], "objects": {"ref": ["sheep", "sheep", "sheep"], "bbox": [[90.9, 160.8, 135, 212.8], [360.9, 480.8, 495, 532.8]]}}
 ```
@@ -329,10 +245,10 @@ Testing the final format of the grounding data in ms-swift format:
 ```python
 import os
 os.environ["MAX_PIXELS"] = "1003520"
-from swift import get_processor, get_template
+from swift.llm import get_model_tokenizer, get_template
 
-processor = get_processor('Qwen/Qwen2.5-VL-7B-Instruct')
-template = get_template(processor)
+_, tokenizer = get_model_tokenizer('Qwen/Qwen2.5-VL-7B-Instruct', load_model=False)
+template = get_template(tokenizer.model_meta.template, tokenizer)
 data = {...}
 template.set_mode('train')
 encoded = template.encode(data, return_template_inputs=True)
@@ -365,7 +281,7 @@ Here are example data samples for a text-only Agent and a multimodal Agent:
 
 ## dataset_info.json
 
-You can refer to the ms-swift built-in [dataset_info.json](https://github.com/modelscope/ms-swift/blob/main/swift/dataset/data/dataset_info.json). This approach uses the AutoPreprocessor function to convert the dataset into a standard format. The dataset_info.json file contains a list of metadata about the dataset. Here are some examples:
+You can refer to the ms-swift built-in [dataset_info.json](https://github.com/modelscope/ms-swift/blob/main/swift/llm/dataset/data/dataset_info.json). This approach uses the AutoPreprocessor function to convert the dataset into a standard format. The dataset_info.json file contains a list of metadata about the dataset. Here are some examples:
 
 
 ```json
@@ -422,7 +338,7 @@ The following parameters are supported:
 
 - ms_dataset_id: The dataset_id for ModelScope, default is None.
 - hf_dataset_id: The dataset_id for HuggingFace, default is None.
-- dataset_path: Local path to the **dataset file/folder** (absolute path recommended). Default is None.
+- dataset_path: The local path to the dataset (an absolute path is recommended), default is None.
 - dataset_name: The alias of the dataset, which can be specified via `--dataset <dataset_name>`. This is very convenient when the dataset_path is long. The default value is None.
 - subsets: A list of subdataset names or a list of `SubsetDataset` objects, default is `['default']`. (The concepts of subdatasets and splits only exist for dataset_id or dataset_dir (open source datasets cloned via git)).
 - split: Defaults to `['train']`.
@@ -433,9 +349,7 @@ The following parameters are supported:
 Below are examples of registering datasets:
 
 ```python
-from swift.dataset import (
-    ResponsePreprocessor, DatasetMeta, register_dataset, SubsetDataset, load_dataset
-)
+from swift.llm import ResponsePreprocessor, DatasetMeta, register_dataset, SubsetDataset, load_dataset
 from typing import Dict, Any
 
 class CustomPreprocessor(ResponsePreprocessor):

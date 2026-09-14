@@ -206,30 +206,4 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-data
-data_ut
-data_ut_vlt
-data_ut_mix
-data_vpt
-outputs*
-failure/
-failure_legacy_composites/
-# ms-swift is tracked as an official Git submodule (see .gitmodules).
-vp_images_test
-sota*
-vis*
-data
-data/
-data_vplt
-icme_vis_results_ablation
-icme_vis_results
-models
-reason_track
-
-output_prl
-sota_results
-result_tnl2k
-
-
-tmp
-paper
+data/*.jsonl

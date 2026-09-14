@@ -1,7 +1,5 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import dataclasses
-import gradio as gr
-import json
 import os
 import sys
 import time
@@ -10,13 +8,14 @@ from collections import OrderedDict
 from dataclasses import fields
 from datetime import datetime
 from functools import wraps
+from typing import Any, Dict, List, Type
+
+import gradio as gr
+import json
 from gradio import Accordion, Audio, Button, Checkbox, Dropdown, File, Image, Slider, Tab, TabItem, Textbox, Video
 from modelscope.hub.utils.utils import get_cache_dir
-from typing import Any, Dict, List, Literal, Optional, Type, Union, get_args, get_origin
 
-from swift.arguments import BaseArguments
-from swift.model import get_matched_model_meta
-from swift.template import TEMPLATE_MAPPING
+from swift.llm import TEMPLATE_MAPPING, BaseArguments, get_matched_model_meta
 
 all_langs = ['zh', 'en']
 builder: Type['BaseUI'] = None
@@ -269,19 +268,12 @@ class BaseUI:
         choice_dict = {}
         for f in fields(dataclass):
             default_value = f.default
-            type_orign = get_origin(f.type)
-            type_args = get_args(f.type)
             if 'MISSING_TYPE' in str(default_value):
                 default_value = None
             if 'choices' in f.metadata:
                 choice_dict[f.name] = list(f.metadata['choices'])
-            if type_orign is Literal:
-                choice_dict[f.name] = list(type_args)
-            elif type_orign is Union and type(None) in type_args:
-                for inner_type in type_args:
-                    if get_origin(inner_type) is Literal:
-                        choice_dict[f.name] = list(get_args(inner_type))
-                        break
+            if 'Literal' in str(f.type) and typing.get_args(f.type):
+                choice_dict[f.name] = list(typing.get_args(f.type))
             if f.name in choice_dict and default_value not in choice_dict[f.name]:
                 choice_dict[f.name].insert(0, default_value)
         return choice_dict
@@ -350,10 +342,7 @@ class BaseUI:
                         else:
                             raise e
                 else:
-                    if os.path.exists(os.path.join(model, 'adapter_config.json')):
-                        args = arg_cls(adapters=model, load_data_args=True)
-                    else:
-                        args = arg_cls(model=model, load_data_args=True)
+                    args = arg_cls(ckpt_dir=model, load_data_args=True)
             except ValueError:
                 return [gr.update()] * (len(keys) + int(has_record))
             values = []

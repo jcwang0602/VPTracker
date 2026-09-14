@@ -1,7 +1,7 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
+
 kwargs = {
     'per_device_train_batch_size': 2,
     'save_steps': 50,
@@ -11,9 +11,9 @@ kwargs = {
 
 
 def test_llm():
-    from swift import InferArguments, SftArguments, infer_main, sft_main
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
     result = sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2-7B-Instruct',
             dataset=['AI-ModelScope/alpaca-gpt4-data-zh#1000', 'swift/self-cognition#1000'],
             split_dataset_ratio=0.01,
@@ -27,9 +27,9 @@ def test_llm():
 
 
 def test_streaming():
-    from swift import InferArguments, SftArguments, infer_main, sft_main
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
     result = sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2-7B-Instruct',
             dataset=['AI-ModelScope/alpaca-gpt4-data-zh#10000'],
             packing=True,
@@ -44,9 +44,9 @@ def test_streaming():
 
 
 def test_mllm_streaming():
-    from swift import InferArguments, SftArguments, infer_main, sft_main
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
     result = sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2.5-VL-7B-Instruct',
             dataset=['AI-ModelScope/LaTeX_OCR#20000'],
             packing=True,

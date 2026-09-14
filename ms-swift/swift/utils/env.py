@@ -1,8 +1,8 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import os
-from transformers.integrations import deepspeed_config
-from transformers.utils import strtobool
 from typing import Optional, Tuple
+
+from transformers.utils import strtobool
 
 from .logger import get_logger
 
@@ -21,7 +21,7 @@ def get_hf_endpoint():
 
 
 def is_deepspeed_enabled():
-    return deepspeed_config() is not None
+    return strtobool(os.environ.get('ACCELERATE_USE_DEEPSPEED', '0'))
 
 
 def get_dist_setting() -> Tuple[int, int, int, int]:
@@ -77,16 +77,10 @@ def is_mp() -> bool:
 
 def is_mp_ddp() -> bool:
     _, _, world_size, _ = get_dist_setting()
-    disable_mp_ddp = strtobool(os.environ.get('DISABLE_MP_DDP', '0'))
-    if not disable_mp_ddp and is_dist() and is_mp() and world_size > 1:
+    if is_dist() and is_mp() and world_size > 1:
         logger.info_once('Using MP(device_map) + DDP')
         return True
     return False
-
-
-def select_device(device_ids='0'):
-    os.environ['CUDA_VISIBLE_DEVICES'] = device_ids
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = device_ids
 
 
 def is_pai_training_job() -> bool:

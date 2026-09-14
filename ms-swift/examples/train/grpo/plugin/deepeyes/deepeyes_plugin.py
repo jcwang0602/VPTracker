@@ -2,22 +2,23 @@
 
 import base64
 import io
-import json
 import os
 import random
 import re
 from math import ceil, floor
-from openai import OpenAI
-from PIL import Image
 from typing import Any, Dict, List
 
-from swift.rewards.orm import ORM, orms
-from swift.rollout.multi_turn import MultiTurnScheduler, multi_turns
+import json
+from openai import OpenAI
+from PIL import Image
+
+from swift.plugin.multi_turn import MultiTurnScheduler, multi_turns
+from swift.plugin.orm import ORM, orms
 
 try:
     from math_verify import parse, verify
 except ImportError as e:
-    raise ImportError('please install math_verify by `pip install math_verify`') from e
+    raise ImportError('please install math_verify by `pip install math_verify==0.5.2`') from e
 """
 3 dataset file
     1. data_v0.8_visual_toolbox_v2.parquet:  data_source == 'chart' (vl_agent.compute_score)
@@ -187,8 +188,8 @@ def rule_math_verify(ground_truth, model_answer):
 
 class DeepEyesReward(ORM):
 
-    def __init__(self, args, **kwargs):
-        super().__init__(args)
+    def __init__(self):
+        super().__init__()
         try:
             self.client = OpenAI(
                 api_key='EMPTY',

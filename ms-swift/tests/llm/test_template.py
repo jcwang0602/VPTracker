@@ -1,21 +1,16 @@
-import importlib.util
 import os
-import torch
 import unittest
 
-from swift.infer_engine import RequestConfig, TransformersEngine
-from swift.model import get_processor
-from swift.template import get_template
+from swift.llm import PtEngine, RequestConfig, get_model_tokenizer, get_template
 from swift.utils import get_logger, seed_everything
 
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-# os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
 os.environ['SWIFT_DEBUG'] = '1'
 
 logger = get_logger()
 
 
-def _infer_model(engine, system=None, messages=None):
+def _infer_model(pt_engine, system=None, messages=None):
     seed_everything(42)
     request_config = RequestConfig(max_tokens=128, temperature=0)
     if messages is None:
@@ -23,33 +18,31 @@ def _infer_model(engine, system=None, messages=None):
         if system is not None:
             messages += [{'role': 'system', 'content': system}]
         messages += [{'role': 'user', 'content': '你好'}]
-        resp = engine.infer([{'messages': messages}], request_config=request_config)
+        resp = pt_engine.infer([{'messages': messages}], request_config=request_config)
         response = resp[0].choices[0].message.content
         messages += [{'role': 'assistant', 'content': response}, {'role': 'user', 'content': '<image>这是什么'}]
-    resp = engine.infer([{
+    resp = pt_engine.infer([{
         'messages': messages,
     }], request_config=request_config)
     response = resp[0].choices[0].message.content
     messages += [{'role': 'assistant', 'content': response}]
-    logger.info(f'model: {engine.model_info.model_name}, messages: {messages}')
+    logger.info(f'model: {pt_engine.model_info.model_name}, messages: {messages}')
     return response
 
 
 class TestTemplate(unittest.TestCase):
 
-    @unittest.skipIf(not torch.cuda.is_available(), reason='GPTQ is only available on GPU')
-    @unittest.skipIf(importlib.util.find_spec('gptqmodel') is None, reason='gptqmodel is not installed')
     def test_template(self):
-        engine = TransformersEngine('Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4')
-        response = _infer_model(engine)
-        engine.template.template_backend = 'jinja'
-        response2 = _infer_model(engine)
+        pt_engine = PtEngine('Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4')
+        response = _infer_model(pt_engine)
+        pt_engine.default_template.template_backend = 'jinja'
+        response2 = _infer_model(pt_engine)
         assert response == response2
 
     def test_tool_message_join(self):
         from copy import deepcopy
 
-        from swift.agent_template import agent_template_map
+        from swift.plugin import agent_templates
 
         messages = [
             # first round
@@ -85,11 +78,11 @@ class TestTemplate(unittest.TestCase):
         ]
 
         # testing two template type.
-        tokenizer = get_processor('Qwen/Qwen2.5-7B-Instruct')
-        template = get_template(tokenizer)
+        tokenizer = get_model_tokenizer('Qwen/Qwen2.5-7B-Instruct', load_model=False)[1]
+        template = get_template(tokenizer.model_meta.template, tokenizer)
         for agent_template_type in ('react_zh', 'qwen_zh'):
-            template._agent_template = agent_template_type
-            agent_template = template.agent_template
+            agent_template = agent_templates[agent_template_type]()
+            template.agent_template = agent_template
             observation = agent_template.keyword.observation
             test_messages = deepcopy(messages)
             test_messages[2]['content'] = 'assistant2' + observation

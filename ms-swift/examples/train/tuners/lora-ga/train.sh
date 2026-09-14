@@ -2,7 +2,7 @@
 CUDA_VISIBLE_DEVICES=0 \
 swift sft \
     --model Qwen/Qwen2-1.5B-Instruct \
-    --tuner_type lora \
+    --train_type lora \
     --dataset 'swift/self-cognition#1000' \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
@@ -27,7 +27,7 @@ swift sft \
 # Infer
 # swift infer \
 #     --model Qwen/Qwen2-1.5B-Instruct \
-#     --adapters ./output/Qwen2-1.5B-Instruct/v0-20241214-191235/checkpoint-62/converted/default \
-#     --infer_backend transformers \
+#     --ckpt_dir ./output/Qwen2-1.5B-Instruct/v0-20241214-191235/checkpoint-62/converted/default \
+#     --infer_backend pt \
 #     --stream true \
 #     --max_new_tokens 2048

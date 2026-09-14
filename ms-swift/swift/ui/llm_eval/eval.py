@@ -1,10 +1,10 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from typing import Type
 
-from swift.arguments import EvalArguments
+import gradio as gr
+
+from swift.ui.base import BaseUI
 from swift.utils import get_logger
-from ..base import BaseUI
 
 logger = get_logger()
 
@@ -98,6 +98,7 @@ class Eval(BaseUI):
     @classmethod
     def do_build_ui(cls, base_tab: Type['BaseUI']):
         try:
+            from swift.llm.argument.eval_args import EvalArguments
             eval_dataset_dict = EvalArguments.list_eval_dataset()
             default_backend = EvalArguments.eval_backend
         except Exception as e:

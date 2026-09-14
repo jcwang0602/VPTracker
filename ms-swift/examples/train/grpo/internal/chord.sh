@@ -19,6 +19,7 @@ swift rlhf \
     --load_from_cache_file true \
     --torch_dtype bfloat16 \
     --beta 0.0 \
+    --steps_per_generation 4 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 4 \
     --gradient_accumulation_steps 8 \
@@ -30,7 +31,7 @@ swift rlhf \
     --chord_mu_peak 0.9 \
     --chord_mu_valley 0.05 \
     --num_generations 8 \
-    --tuner_type full \
+    --train_type full \
     --reward_funcs accuracy \
     --system "$CHORD_SYSTEM_PROMPT" \
     --use_vllm true \

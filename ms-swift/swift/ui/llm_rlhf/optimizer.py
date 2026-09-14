@@ -1,5 +1,5 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-from ..llm_train import Optimizer
+# Copyright (c) Alibaba, Inc. and its affiliates.
+from swift.ui.llm_train.optimizer import Optimizer
 
 
 class RLHFOptimizer(Optimizer):

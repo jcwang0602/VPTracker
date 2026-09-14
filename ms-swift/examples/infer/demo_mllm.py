@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 from typing import List, Literal
 
@@ -99,19 +99,20 @@ def get_data(mm_type: Literal['text', 'image', 'video', 'audio']):
 if __name__ == '__main__':
     # The inference of the trained model can be referred to as:
     # https://github.com/modelscope/ms-swift/tree/main/examples/notebook
-    from swift import InferEngine, InferRequest, InferStats, RequestConfig, TransformersEngine, load_dataset
-    infer_backend = 'transformers'
+    from swift.llm import InferEngine, InferRequest, PtEngine, RequestConfig, load_dataset
+    from swift.plugin import InferStats
+    infer_backend = 'pt'
 
-    if infer_backend == 'transformers':
+    if infer_backend == 'pt':
         # test env: transformers==4.55.2
         model = 'Qwen/Qwen2.5-Omni-7B'
         mm_type = 'audio'
-        engine = TransformersEngine(model, max_batch_size=64, attn_impl='flash_attention_2')
+        engine = PtEngine(model, max_batch_size=64, attn_impl='flash_attention_2')
     elif infer_backend == 'vllm':
         # test env: vllm==0.8.5.post1, transformers==4.51.3
         # The meaning of environment variables can be found at:
         # https://swift.readthedocs.io/zh-cn/latest/Instruction/%E5%91%BD%E4%BB%A4%E8%A1%8C%E5%8F%82%E6%95%B0.html#id17
-        from swift.infer_engine import VllmEngine
+        from swift.llm import VllmEngine
         os.environ['MAX_PIXELS'] = '1003520'
         os.environ['VIDEO_MAX_PIXELS'] = '50176'
         os.environ['FPS_MAX_FRAMES'] = '12'
@@ -121,7 +122,7 @@ if __name__ == '__main__':
         mm_type = 'image'  # or 'video'
     elif infer_backend == 'lmdeploy':
         # test env: lmdeploy==0.7.1
-        from swift.infer_engine import LmdeployEngine
+        from swift.llm import LmdeployEngine
         model = 'OpenGVLab/InternVL2_5-1B'
         engine = LmdeployEngine(model, vision_batch_size=8)
         mm_type = 'image'  # or 'video'

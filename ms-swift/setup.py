@@ -1,9 +1,7 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 # !/usr/bin/env python
-from setuptools import find_packages, setup
-
 import os
-import re
+from setuptools import find_packages, setup
 from typing import List
 
 
@@ -18,7 +16,8 @@ version_file = 'swift/version.py'
 
 def get_version():
     with open(version_file, 'r', encoding='utf-8') as f:
-        return re.search(r'^__version__\s*=\s*["\'](.+?)["\']', f.read(), re.M).group(1)
+        exec(compile(f.read(), version_file, 'exec'))
+    return locals()['__version__']
 
 
 def parse_requirements(fname='requirements.txt', with_version=True):
@@ -120,7 +119,6 @@ if __name__ == '__main__':
     install_requires, deps_link = parse_requirements('requirements.txt')
     extra_requires = {}
     all_requires = []
-    extra_requires['megatron'], _ = parse_requirements('requirements/megatron.txt')
     extra_requires['eval'], _ = parse_requirements('requirements/eval.txt')
     extra_requires['swanlab'], _ = parse_requirements('requirements/swanlab.txt')
     extra_requires['ray'], _ = parse_requirements('requirements/ray.txt')
@@ -138,12 +136,13 @@ if __name__ == '__main__':
         long_description_content_type='text/markdown',
         author='DAMO ModelScope teams',
         author_email='contact@modelscope.cn',
-        keywords=['transformers', 'LLM', 'lora', 'megatron', 'grpo', 'sft'],
-        url='https://github.com/modelscope/ms-swift',
-        packages=find_packages(exclude=('tests', 'tests.*')),
+        keywords='python, petl, efficient tuners',
+        url='https://github.com/modelscope/swift',
+        packages=find_packages(exclude=('configs', 'demo')),
         include_package_data=True,
-        package_data={'': ['utils/*', 'dataset/data/*.*', 'config/*.json', 'loss_scale/config/*.json']},
-        python_requires='>=3.8.0',
+        package_data={
+            '': ['*.h', '*.cpp', '*.cu'],
+        },
         classifiers=[
             'Development Status :: 4 - Beta',
             'License :: OSI Approved :: Apache Software License',

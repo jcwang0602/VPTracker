@@ -4,8 +4,7 @@ NPROC_PER_NODE=4 \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 megatron rlhf \
     --rlhf_type dpo \
-    --model Qwen/Qwen3-4B-Instruct-2507 \
-    --save_safetensors true \
+    --load Qwen3-4B-Instruct-2507-mcore \
     --dataset 'AI-ModelScope/orpo-dpo-mix-40k' \
     --load_from_cache_file true \
     --split_dataset_ratio 0.01 \
@@ -16,22 +15,21 @@ megatron rlhf \
     --recompute_granularity full \
     --recompute_method uniform \
     --recompute_num_layers 1 \
-    --num_train_epochs 1 \
+    --max_epochs 1 \
     --finetune true \
     --cross_entropy_loss_fusion true \
     --lr 1e-5 \
     --lr_warmup_fraction 0.05 \
     --min_lr 1e-6 \
-    --output_dir megatron_output/Qwen3-4B-Instruct-2507 \
-    --eval_steps 200 \
-    --save_steps 200 \
+    --save megatron_output/Qwen3-4B-Instruct-2507 \
+    --eval_interval 200 \
+    --save_interval 200 \
     --max_length 8192 \
-    --dataloader_num_workers 8 \
+    --num_workers 8 \
     --dataset_num_proc 8 \
     --no_save_optim true \
     --no_save_rng true \
     --sequence_parallel true \
     --attention_backend flash \
     --beta 0.1 \
-    --rpo_alpha 0.1 \
     --loss_type sigmoid

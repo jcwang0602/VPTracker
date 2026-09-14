@@ -1,7 +1,7 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
+
 kwargs = {
     'per_device_train_batch_size': 2,
     'per_device_eval_batch_size': 2,
@@ -18,12 +18,12 @@ SYSTEM_PROMPT = ('A conversation between User and Assistant. The user asks a que
 
 
 def test_llm():
-    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
+    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='grpo',
             model='Qwen/Qwen2.5-1.5B-Instruct',
-            tuner_type='full',
+            train_type='full',
             dataset=['AI-MO/NuminaMath-TIR#100'],
             split_dataset_ratio=0.1,
             system=SYSTEM_PROMPT,
@@ -36,12 +36,12 @@ def test_llm():
 
 
 def test_llm_zero2():
-    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
+    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='grpo',
             model='Qwen/Qwen2.5-1.5B-Instruct',
-            tuner_type='full',
+            train_type='full',
             dataset=['AI-MO/NuminaMath-TIR#100'],
             system=SYSTEM_PROMPT,
             reward_funcs=['accuracy', 'format'],
@@ -54,13 +54,13 @@ def test_llm_zero2():
 
 
 def test_llm_vllm():
-    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
+    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='grpo',
             model='Qwen/Qwen2.5-1.5B-Instruct',
             reward_model='AI-ModelScope/GRM_Llama3.1_8B_rewardmodel-ft',
-            tuner_type='full',
+            train_type='full',
             dataset=['AI-MO/NuminaMath-TIR#100'],
             system=SYSTEM_PROMPT,
             reward_funcs=['accuracy', 'format'],
@@ -73,12 +73,12 @@ def test_llm_vllm():
 
 
 def test_llm_vllm_zero2():
-    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
+    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='grpo',
             model='Qwen/Qwen2.5-1.5B-Instruct',
-            tuner_type='full',
+            train_type='full',
             dataset=['AI-MO/NuminaMath-TIR#100'],
             system=SYSTEM_PROMPT,
             reward_funcs=['accuracy', 'format'],
@@ -92,12 +92,12 @@ def test_llm_vllm_zero2():
 
 
 def test_mllm_pt():
-    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
+    from swift.llm import rlhf_main, RLHFArguments, infer_main, InferArguments
     result = rlhf_main(
         RLHFArguments(
             rlhf_type='grpo',
             model='Qwen/Qwen2-VL-2B-Instruct',
-            tuner_type='full',
+            train_type='full',
             # dataset=['AI-MO/NuminaMath-TIR#100'],
             dataset=['modelscope/coco_2014_caption:validation#100'],
             system=SYSTEM_PROMPT,
@@ -109,45 +109,9 @@ def test_mllm_pt():
     infer_main(InferArguments(adapters=last_model_checkpoint, load_data_args=True, merge_lora=True))
 
 
-def test_grpo_minimal():
-    import trl
-    from packaging import version
-    if version.parse(trl.__version__) < version.parse('0.26'):
-        print(f'Skipping test_grpo_minimal: trl>=0.26 required, found trl=={trl.__version__}')
-        return
-    from swift import InferArguments, RLHFArguments, infer_main, rlhf_main
-    result = rlhf_main(
-        RLHFArguments(
-            rlhf_type='grpo',
-            model='Qwen/Qwen2-0.5B',
-            tuner_type='lora',
-            dataset=['AI-ModelScope/alpaca-gpt4-data-zh#20'],
-            system=SYSTEM_PROMPT,
-            reward_funcs=['format'],
-            max_completion_length=128,
-            num_generations=2,
-            max_steps=2,
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=1,
-            save_steps=2,
-            split_dataset_ratio=0.01,
-            logging_steps=1,
-            use_vllm=False,
-            **{
-                k: v
-                for k, v in kwargs.items() if k not in [
-                    'per_device_train_batch_size', 'save_steps', 'gradient_accumulation_steps', 'num_train_epochs',
-                    'per_device_eval_batch_size'
-                ]
-            }))
-    last_model_checkpoint = result['last_model_checkpoint']
-    infer_main(InferArguments(adapters=last_model_checkpoint, load_data_args=True))
-
-
 if __name__ == '__main__':
     # test_llm()
     # test_llm_zero3()
     # test_llm_vllm()
     # test_llm_vllm_zero2()
     test_mllm_pt()
-    # test_grpo_minimal()

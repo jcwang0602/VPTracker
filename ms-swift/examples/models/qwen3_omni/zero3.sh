@@ -1,8 +1,8 @@
 # 2 * 60GiB
 # mcore shell: https://github.com/modelscope/ms-swift/blob/main/examples/megatron/multimodal/omni/moe.sh
+MAX_PIXELS=1003520 \
 NPROC_PER_NODE=2 \
-IMAGE_MAX_TOKEN_NUM=1024 \
-VIDEO_MAX_TOKEN_NUM=128 \
+VIDEO_MAX_PIXELS=50176 \
 FPS_MAX_FRAMES=12 \
 CUDA_VISIBLE_DEVICES=0,1 \
 swift sft \
@@ -13,13 +13,12 @@ swift sft \
               'speech_asr/speech_asr_aishell1_trainsets:validation#5000' \
     --split_dataset_ratio 0.01 \
     --load_from_cache_file true \
-    --tuner_type lora \
+    --train_type lora \
     --torch_dtype bfloat16 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 8 \
     --attn_impl flash_attn \
-    --experts_impl grouped_mm \
     --learning_rate 1e-4 \
     --lora_rank 8 \
     --lora_alpha 32 \

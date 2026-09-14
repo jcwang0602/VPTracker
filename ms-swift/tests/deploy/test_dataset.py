@@ -1,8 +1,7 @@
 def _test_client(port=8000):
     import time
-
-    from swift.dataset import load_dataset
-    from swift.infer_engine import InferClient, InferRequest, RequestConfig
+    import aiohttp
+    from swift.llm import InferClient, InferRequest, RequestConfig, load_dataset, run_deploy
     dataset = load_dataset(['AI-ModelScope/alpaca-gpt4-data-zh#1000'], num_proc=4)
     infer_client = InferClient(port=port)
     while True:
@@ -23,11 +22,10 @@ def _test_client(port=8000):
 
 def _test(infer_backend):
     import os
-
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
-    from swift.arguments import DeployArguments
-    from swift.pipelines import run_deploy
+
+    from swift.llm import DeployArguments
+    from swift.llm import run_deploy
     args = DeployArguments(model='Qwen/Qwen2-7B-Instruct', infer_backend=infer_backend, verbose=False)
     with run_deploy(args) as port:
         _test_client(port)
@@ -42,7 +40,7 @@ def test_lmdeploy():
 
 
 def test_pt():
-    _test('transformers')
+    _test('pt')
 
 
 def test_vllm_origin():

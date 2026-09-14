@@ -1,11 +1,12 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from typing import Type
 
-from ..base import BaseUI
-from ..llm_train import Tuner
-from .lora import GRPOLoRA
-from .target import GRPOTarget
+import gradio as gr
+
+from swift.ui.base import BaseUI
+from swift.ui.llm_grpo.lora import GRPOLoRA
+from swift.ui.llm_grpo.target import GRPOTarget
+from swift.ui.llm_train.tuner import Tuner
 
 
 class GRPOTuner(Tuner):

@@ -1,5 +1,5 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-from ..llm_train import LoRA
+# Copyright (c) Alibaba, Inc. and its affiliates.
+from swift.ui.llm_train.lora import LoRA
 
 
 class RLHFLoRA(LoRA):

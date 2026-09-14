@@ -1,5 +1,7 @@
 # GRPO
 
+GRPOTrainer在ms-swift3.5进行了代码重构，如果你使用的swift版本<3.5, 请参考[stable文档](https://github.com/modelscope/ms-swift/blob/v3.4.1/docs/source/Instruction/GRPO.md)
+
 [GRPO(Group Relative Policy Optimization)](https://arxiv.org/abs/2402.03300) 算法利用组内相对优势计算来替代 PPO 算法中独立的价值模型，并直接在损失函数中加入 KL 散度惩罚来提高训练稳定性。
 
 ## 算法原理
@@ -37,10 +39,10 @@ completions = rollout_function(
 )
 """
 completions = [
-    (completion 1) "The larger number is 9.9...",
-    (completion 2) "9.11 is bigger than...",
+    (completion 1) "The larger number is 9.11...",
+    (completion 2) "9.9 is bigger than...",
     ...
-    (completion 8) "After calculation, 9.9..."
+    (completion 8) "After calculation, 9.11..."
 ]
 """
 
@@ -48,7 +50,7 @@ completions = [
 # Evaluate generated completions using reward model
 rewards = reward_function(
     completions=completions,
-    ground_truth="9.9"  # Expected correct answer
+    ground_truth="9.11"  # Expected correct answer
 )
 """
 rewards = [
@@ -108,7 +110,7 @@ optimizer.step()
 
 训练脚本示例参考[examples](https://github.com/modelscope/ms-swift/tree/main/examples/train/grpo)
 
-GRPO参数参考[文档](../../../Instruction/Command-line-parameters.md#grpo参数)
+GROP参数参考[文档](../../../Instruction/Command-line-parameters.md#grpo参数)
 
 ## 集群支持
 
@@ -157,12 +159,6 @@ GRPO 训练框架支持集成高性能推理引擎（如 vLLM）来加速采样�
 --move_model_batches [批次数量]
 ```
 
-6. 将 Megatron 导出的用于 vLLM 更新的 HF 格式权重存放在 CPU 主存中，以降低 GPU 显存占用：
-
-```bash
---offload_bridge true
-```
-
 ### 2. Async(External) Mode
 
 训练与推理资源分离，启动单独的推理服务器
@@ -190,7 +186,7 @@ swift rollout \
 
 更多 rollout 参数参考[vLLM参数](../../../Instruction/Command-line-parameters.md#vllm参数)和[rollout 参数](../../../Instruction/Command-line-parameters.md#rollout参数)
 
-注意：在使用 vllm_use_async_engine 时，仅开启 DP 可能会导致错误，相关问题参考： [vllm issue](https://github.com/vllm-project/vllm/issues/18567)。如果出现错误，请尝试同时启用 TP 和 DP，或升级vLLM
+注意：在使用 use_async_engine 时，仅开启 DP 可能会导致错误，相关问题参考： [vllm issue](https://github.com/vllm-project/vllm/issues/18567)。如果出现错误，请尝试同时启用 TP 和 DP，或升级vLLM
 
 
 训练使用以下参数配置外部 vLLM 服务器
@@ -201,11 +197,8 @@ swift rollout \
 --vllm_server_port <服务端口> \
 --vllm_server_timeout <超时时间> \
 ```
-
-### 权重同步加速
-设置以下参数可以通过仅同步 LoRA adapter 权重而非全量模型权重，优化 LoRA 训练的权重同步速度。
-
-> 注意：这种同步方式会略微影响 vLLM 推理速度。
+#### 权重同步加速
+swift 3.10 优化了权重同步，设置以下参数可以进一步优化 LoRA 训练的权重同步速度。
 
 ```bash
 # rollout(server mode)
@@ -220,27 +213,14 @@ swift rlhf \
     --vllm_mode colocate \
     --vllm_enable_lora true \
     ...
-
-# megatron grpo(colocate mode)
-swift megatron rlhf \
-    --rlhf_type grpo \
-    --vllm_mode colocate \
-    --vllm_enable_lora true \
-    ...
 ```
 
-**多模态模型 ViT 层 LoRA 同步：** 如果训练时开启了 ViT 层的 LoRA（`freeze_vit false`），
-在仅同步LoRA的模式下，需要相应在 vLLM 侧开启 tower/connector LoRA 支持。
+注意：以下情况无法使用该优化：
 
-通过 `vllm_engine_kwargs` 传入：
+- 训练多模态模型的ViT层(freeze_vit false)
+- MoE 模型
 
-```bash
---vllm_engine_kwargs '{"enable_tower_connector_lora": true}'
-```
-
-该功能为 vLLM 实验性特性，目前支持 Qwen2.5-VL、Qwen3-VL 等模型。
-具体支持情况请参阅 [vLLM 文档](https://docs.vllm.ai/en/latest/features/lora/)
-和 [vLLM issue](https://github.com/vllm-project/vllm/issues/31479)。
+优化实现细节请参考该[PR](https://github.com/modelscope/ms-swift/pull/5773)
 
 ## logged metrics
 - completions/mean_length：生成的 completion 的平均长度。
@@ -271,20 +251,6 @@ swift megatron rlhf \
 
 如果设置了`top_entropy_quantile`参数<1.0, 则会记录entropy threshold的值
 - entropy/threshold: 分位点处的 entropy 值，小于该值的 token 将不会被计算 loss
-
-训推一致性指标，前缀为rollout_correction，需设置`log_rollout_offpolicy_metrics=true`或`rollout_importance_sampling_mode`：
-- `kl` / `k3_kl`：训练策略与 rollout 策略之间的 KL 散度（直接估计器 / K3 估计器）
-- `training_ppl` / `rollout_ppl`：训练策略和 rollout 策略的困惑度
-- `log_ppl_diff`：log PPL 差异，反映分布偏移程度
-- `ppl_ratio`：PPL 比率
-- `chi2_token` / `chi2_seq`：Token/Sequence 级别的 χ² 散度
-
-IS 校正指标（需设置`rollout_importance_sampling_mode`）：
-- `is_weight_mean`：平均重要性采样权重
-- `ess`：有效样本大小（Effective Sample Size）
-- `clipped_frac`：被截断或屏蔽的样本比例
-
-> 训推一致性指标详细说明请参考文档 [Training-Inference-Mismatch](../AdvancedResearch/training_inference_mismatch.md)
 
 如果设置了`log_completions`, 将保存训练动态在output对应文件夹中，包括
 - step：记录时的训练步数
@@ -319,8 +285,8 @@ effective_batch_size = num_processes * per_device_train_batch_size * gradient_ac
 采样阶段，总的批量大小 (completion-level) 数量等于:
 
 1. 设置 generation_batch_size 下，等于 generation_batch_size
-2. 设置 steps_per_generation 下，等于 per_device_train_batch_size * steps_per_generation * num_processes
-3. 默认情况下，steps_per_generation = gradient_accumulation_steps，generation_batch_size = per_device_train_batch_size * steps_per_generation * num_processes = per_device_train_batch_size * gradient_accumulation_steps * num_processes = effective_batch_size
+2. 设置 steps_per_generation 下， 等于 steps_per_generation * 训练总批量大小
+3. 默认等于训练总批量大小(即num_processes * per_device_train_batch_size * gradient_accumulation_steps)
 
 在评估阶段，completion 的数量等于：
 ```
@@ -350,7 +316,7 @@ num_processes * per_device_eval_batch_size
 
 参考[issue](https://github.com/modelscope/ms-swift/issues/3912)
 
-**5. clip_ratio为什么总是0?**
+**5. clip_ratio为什么总是1?**
 
 Clip机制的核心目的是限制策略更新的幅度，防止因单次更新过大而导致策略性能崩溃（即策略更新后表现急剧下降）。
 Clip操作的具体公式如下：
@@ -366,33 +332,39 @@ $
 因此重要性采样比恒为 1，此时，clip 操作不会生效。
 
 在设置以下参数情况下，算法为off-policy (near-on-policy)
-1. num_iterations > 1, 或者
+1. num_iterations > 1
 2. gradient_accumulation_steps % steps_per_generation != 0
 
 参考[issue](https://github.com/huggingface/open-r1/issues/239#issuecomment-2646297851)
 
-**6. 如何设置训练的 `mini-batch size`**
+**6. 为什么没有设置val_dataset，仍然有验证过程，如何取消**
+
+当没有显式传入`val_dataset`时，参数`split_dataset_ratio`负责切分部分`dataset`为验证数据集，默认切分1%数据（在"ms-swift>=3.6"中，`split_dataset_ratio`的默认值将从0.01修改为0.）
+
+通过设置`--split_dataset_ratio 0` 来取消验证过程
+
+**7. 如何设置训练的 `mini-batch size`**
 
 在 GRPO 训练中，我们可以通过以下两种方式配置 mini-batch 更新：
-- 设置 `generation_batch_size` 为训练 global batch size (effective_batch_size) 的整数倍
-- 或设置 `steps_per_generation` 为 `gradient_accumulation_steps` 的整数倍
 
-典型配置示例：
-- 当配置：
-steps_per_generation = 16, gradient_accumulation_steps = 8, mini_batch_size = steps_per_generation / gradient_accumulation_steps = 2. 则 1 次 rollout 结果将拆分成 2 批 mini-batch 进行更新。
+1. 配置选项：
+- 设置`generation_batch_size`为训练global-batch的整数倍
+- 或设置`steps_per_generation`为`gradient_accumulation_steps`的整数倍
 
-**7. swift deploy 与 swift rollout 的区别**
+2. 典型配置示例：
+当配置：
+steps_per_generation = 16
+gradient_accumulation_steps = 8
+
+则一次 rollout 结果将拆分成两批 mini-batch 进行更新
+
+**8. swift deploy 与 swift rollout 的区别**
 
 - swift deploy 主要用于模型的部署和推理，支持 PT、vLLM、SGLang 等多种引擎，兼容流式推理与 OpenAI API 的调用格式。
 
 - swift rollout 则专注于 GRPO 推理加速，目前仅支持 vLLM 引擎，并内置了权重自动同步的功能。
 
 
-**8. 如何取消 KL 项损失**
+**9. 如何取消 KL 项损失**
 
 将参数设置为 `--beta 0`，即可关闭 KL 损失的计算，并且不会加载参考模型（ref model）。
-
-
-## RL微信群
-
-<img src="https://raw.githubusercontent.com/modelscope/ms-swift/main/docs/resources/wechat/grpo.png" width="250">

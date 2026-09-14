@@ -1,7 +1,7 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from typing import Any, Dict, Optional
 
-from swift.dataset import DatasetMeta, ResponsePreprocessor, load_dataset, register_dataset
+from swift.llm import DatasetMeta, ResponsePreprocessor, load_dataset, register_dataset
 
 
 class CustomPreprocessor(ResponsePreprocessor):

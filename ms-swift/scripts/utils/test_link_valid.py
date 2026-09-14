@@ -1,5 +1,6 @@
 import os
 import re
+
 import requests
 
 from swift.utils import get_logger

@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -6,7 +6,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 
 def infer(engine: 'InferEngine', infer_request: 'InferRequest'):
-    stop = [engine.template.agent_template.keyword.observation]  # compat react_en
+    stop = [engine.default_template.agent_template.keyword.observation]  # compat react_en
     request_config = RequestConfig(max_tokens=512, temperature=0, stop=stop)
     resp_list = engine.infer([infer_request], request_config)
     query = infer_request.messages[0]['content']
@@ -24,7 +24,7 @@ def infer(engine: 'InferEngine', infer_request: 'InferRequest'):
 
 
 def infer_stream(engine: 'InferEngine', infer_request: 'InferRequest'):
-    stop = [engine.template.agent_template.keyword.observation]
+    stop = [engine.default_template.agent_template.keyword.observation]
     request_config = RequestConfig(max_tokens=512, temperature=0, stream=True, stop=stop)
     gen_list = engine.infer([infer_request], request_config)
     query = infer_request.messages[0]['content']
@@ -84,6 +84,9 @@ def infer_continue_generate(engine):
     }, {
         'role': 'assistant',
         'content': 'It is sunny today, '
+    }, {
+        'role': 'assistant',
+        'content': None
     }])
     request_config = RequestConfig(max_tokens=512, temperature=0)
     resp_list = engine.infer([infer_request], request_config)
@@ -92,21 +95,22 @@ def infer_continue_generate(engine):
 
 
 if __name__ == '__main__':
-    from swift.agent_template import agent_template_map
-    from swift.infer_engine import InferEngine, InferRequest, RequestConfig, TransformersEngine
+    from swift.llm import InferEngine, InferRequest, PtEngine, RequestConfig
+    from swift.plugin import agent_templates
     model = 'Qwen/Qwen2.5-1.5B-Instruct'
-    infer_backend = 'transformers'
+    infer_backend = 'pt'
 
-    if infer_backend == 'transformers':
-        engine = TransformersEngine(model, max_batch_size=64)
+    if infer_backend == 'pt':
+        engine = PtEngine(model, max_batch_size=64)
     elif infer_backend == 'vllm':
-        from swift.infer_engine import VllmEngine
+        from swift.llm import VllmEngine
         engine = VllmEngine(model, max_model_len=8192)
     elif infer_backend == 'lmdeploy':
-        from swift.infer_engine import LmdeployEngine
+        from swift.llm import LmdeployEngine
         engine = LmdeployEngine(model)
 
-    # engine.template._agent_template = 'hermes'  # react_en/qwen_en/qwen_en_parallel
+    # agent_template = agent_templates['hermes']()  # react_en/qwen_en/qwen_en_parallel
+    # engine.default_template.agent_template = agent_template
 
     infer(engine, get_infer_request())
     infer_stream(engine, get_infer_request())

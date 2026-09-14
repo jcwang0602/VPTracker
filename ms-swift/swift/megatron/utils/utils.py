@@ -1,29 +1,30 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import re
+# Copyright (c) Alibaba, Inc. and its affiliates.
+from contextlib import contextmanager
+from copy import deepcopy
+from typing import Optional, Tuple
+
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
 from megatron.core.extensions.transformer_engine import TEGroupedLinear, TELayerNormColumnParallelLinear, TELinear
 from megatron.core.inference.communication_utils import recv_from_prev_pipeline_rank_, send_to_next_pipeline_rank
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
-from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.ssm.mamba_context_parallel import _undo_attention_load_balancing
 from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint, sharded_state_dict_default
+from megatron.training import checkpointing, get_args
+from peft.utils.other import ModulesToSaveWrapper
 from torch import nn
-from transformers.utils import is_torch_npu_available
 
-from swift.tuners import LoraConfig, Swift
 from swift.utils import (activate_parameters, deep_getattr, find_layers, freeze_parameters, get_logger,
                          get_model_parameter_info)
-from swift.utils import get_packed_seq_params as _get_packed_seq_params
 
 logger = get_logger()
 
 
-def find_all_linears(model, extra_layers=None):
+def find_all_linears(model):
 
     def _cond(name, module):
-        if (extra_layers and isinstance(module, tuple(extra_layers))) or name != 'output_layer' and isinstance(
+        if name != 'output_layer' and isinstance(
                 module, (TELinear, TELayerNormColumnParallelLinear, TEGroupedLinear, nn.Linear)):
             return True
         return False
@@ -46,10 +47,9 @@ def get_multimodal_target_regex(
     freeze_llm: bool = False,
     freeze_vit: bool = True,
     freeze_aligner: bool = True,
-    include_embedding: bool = False,
-    include_router: bool = False,
 ) -> str:
-    megatron_model_meta = args.megatron_model_meta
+    from ..model import get_megatron_model_meta
+    megatron_model_meta = get_megatron_model_meta(args.hf_model_type)
     modules = []
     visual_cls = megatron_model_meta.visual_cls
     vision_tower = [f'visual.{vit}' for vit in visual_cls._vision_tower]
@@ -61,11 +61,6 @@ def get_multimodal_target_regex(
     if not freeze_aligner:
         modules += aligner
     assert len(modules) > 0, f'modules: {modules}'
-    extra_layers = []
-    if include_embedding:
-        extra_layers.append(LanguageModelEmbedding)
-    if include_router:
-        extra_layers.append(TopKRouter)
 
     res = []
     for module in modules:
@@ -78,13 +73,13 @@ def get_multimodal_target_regex(
         sub_module = deep_getattr(model, module)
         if sub_module is None:
             continue
-        target_modules = find_all_linears(sub_module, extra_layers)
+        target_modules = find_all_linears(sub_module)
         if not target_modules:
             continue
         target_modules = [tm for tm in target_modules if tm]
         target_pattern = rf'.*\.({"|".join(target_modules)})' if target_modules else ''
         rejected_pattern = rf'(?!({"|".join(rejected_modules)}))' if rejected_modules else ''
-        res.append(rf'{rejected_pattern}{re.escape(module)}(?=\.){target_pattern}')
+        res.append(rf'{rejected_pattern}{module}{target_pattern}')
 
     return rf'^({"|".join(res)})$'
 
@@ -94,25 +89,13 @@ def get_target_modules(args, model):
         return args.target_modules
     target_modules = args.target_modules.copy()
     if 'all-linear' in target_modules:
-        if args.is_multimodal and not args.language_model_only:
-            if args.tuner_type == 'lora_llm':
-                kwargs = {
-                    'freeze_llm': False,
-                    'freeze_vit': True,
-                    'freeze_aligner': True,
-                }
-            else:  # lora
-                kwargs = {
-                    'freeze_llm': args.freeze_llm,
-                    'freeze_vit': args.freeze_vit,
-                    'freeze_aligner': args.freeze_aligner,
-                }
+        if args.is_multimodal:
             return get_multimodal_target_regex(
                 args,
                 model,
-                include_embedding='all-embedding' in target_modules,
-                include_router='all-router' in target_modules,
-                **kwargs,
+                freeze_llm=args.freeze_llm,
+                freeze_vit=args.freeze_vit,
+                freeze_aligner=args.freeze_aligner,
             )
         else:
             target_modules.remove('all-linear')
@@ -136,7 +119,40 @@ def get_modules_to_save(args, model):
     return modules_to_save
 
 
-def prepare_adapter(args, model):
+def set_linear_is_expert(model):
+    for n, module in model.named_modules():
+        if '.local_experts.' in n and isinstance(module, (TELinear, TELayerNormColumnParallelLinear)) or isinstance(
+                module, TEGroupedLinear):
+            module.is_expert = True
+
+
+@contextmanager
+def _patch_deepcopy():
+    import copy
+    _origin_deepcopy = copy.deepcopy
+
+    def new_deepcopy(x, *args, **kwargs):
+        if getattr(x, 'tp_group', None) is not None:
+            origin_tp_group = x.tp_group
+            x.tp_group = None
+            res = _origin_deepcopy(x, *args, **kwargs)
+            x.tp_group = origin_tp_group
+            res.tp_group = origin_tp_group
+            return res
+        else:
+            return _origin_deepcopy(x, *args, **kwargs)
+
+    copy.deepcopy = new_deepcopy
+    try:
+        yield
+    finally:
+        copy.deepcopy = _origin_deepcopy
+
+
+def prepare_adapter(model):
+    from swift.tuners import LoraConfig, Swift
+    args = get_args()
+    set_linear_is_expert(model)
     target_modules = get_target_modules(args, model)
     modules_to_save = get_modules_to_save(args, model)
     lora_kwargs = {
@@ -150,36 +166,26 @@ def prepare_adapter(args, model):
     }
     lora_config = LoraConfig(task_type='CAUSAL_LM', lora_dtype=args.lora_dtype, **lora_kwargs)
     logger.info(f'lora_config: {lora_config}')
-    model = Swift.prepare_model(model, lora_config)
-    if args.mcore_ref_adapter or args.ref_adapters:
-        model.add_adapter('ref_adapter', lora_config)
+    with _patch_deepcopy():
+        model = Swift.prepare_model(model, lora_config)
+    if args.ref_adapter_load or args.ref_adapters:
+        lora_config = deepcopy(lora_config)
+        lora_config.inference_mode = True
+        with _patch_deepcopy():
+            model.add_adapter('ref_adapter', lora_config)
         model.base_model._cast_adapter_dtype(adapter_name='ref_adapter', autocast_adapter_dtype=True)
-        for n, p in model.named_parameters():
-            if '.ref_adapter.' in n:
-                p.requires_grad = False
     return model
 
 
-def _prepare_full_vit(args, model):
-    megatron_model_meta = args.megatron_model_meta
-    visual_cls = megatron_model_meta.visual_cls
-    vision_tower = [f'visual.{vit}' for vit in visual_cls._vision_tower]
-    aligner = [f'visual.{aligner}' for aligner in visual_cls._aligner]
-    for module_prefix in vision_tower + aligner:
-        module = deep_getattr(model, module_prefix)
-        if module is not None:
-            module.requires_grad_(True)
-
-
-def prepare_mcore_model(args, model):
-    if args.tuner_type == 'full':
+def prepare_mcore_model(model):
+    args = get_args()
+    if args.train_type == 'full':
         freeze_parameters(model, args.freeze_parameters_ratio, args.freeze_parameters, args.freeze_parameters_regex)
         if args.trainable_parameters or args.trainable_parameters_regex:
             activate_parameters(model, args.trainable_parameters, args.trainable_parameters_regex)
-    elif args.tuner_type in {'lora', 'lora_llm'}:
-        model = prepare_adapter(args, model)
-        if args.tuner_type == 'lora_llm':
-            _prepare_full_vit(args, model)
+    elif args.train_type == 'lora':
+        model.prepare_inputs_for_generation = None  # fix error
+        model = prepare_adapter(model)
     logger.info(f'model: {model}')
     logger.info_if(
         f'[rank{dist.get_rank()}] model_parameter_info: {get_model_parameter_info(model)}',
@@ -187,19 +193,112 @@ def prepare_mcore_model(args, model):
     return model
 
 
+@contextmanager
+def adapter_state_dict_context(is_peft_format: bool = True):
+    if not is_peft_format:
+        yield
+        return
+    _origin_generate_state_dict = checkpointing.generate_state_dict
+
+    def generate_state_dict(args, model, *_args, **kwargs):
+        state_dict = _origin_generate_state_dict(args, model, *_args, **kwargs)
+        new_state_dict = {}
+        state_dict_model = state_dict['model']
+        for n, p in model[0].named_parameters():
+            if not p.requires_grad:
+                continue
+            if n in state_dict_model:
+                new_state_dict[n] = state_dict_model[n]
+            key = n.replace('.weight', '._extra_state')
+            if key.endswith('._extra_state0'):
+                key = key.replace('._extra_state0', '._extra_state')
+            if key in state_dict_model:
+                new_state_dict[key] = state_dict_model[key]
+        state_dict['model'] = new_state_dict
+        return state_dict
+
+    checkpointing.generate_state_dict = generate_state_dict
+    try:
+        yield
+    finally:
+        checkpointing.generate_state_dict = _origin_generate_state_dict
+
+
+def tuners_sharded_state_dict(
+        module,
+        prefix: str = '',
+        sharded_offsets: Tuple[Tuple[int, int, int]] = (),
+        metadata: Optional[dict] = None,
+):
+    sharded_state_dict = {}
+    # Save parameters
+    module._save_to_state_dict(sharded_state_dict, '', keep_vars=True)
+    sharded_state_dict = make_sharded_tensors_for_checkpoint(
+        sharded_state_dict, prefix, sharded_offsets=sharded_offsets)
+    # Recurse into submodules
+    for name, module in module.named_children():
+        if 'Dict' in module.__class__.__name__:
+            modules = module.named_children()
+        else:
+            modules = [(None, module)]
+        for n, m in modules:
+            _prefix = f'{prefix}{name}.' if n is None else f'{prefix}{name}.{n}.'
+            sharded_state_dict.update(sharded_state_dict_default(m, _prefix, sharded_offsets, metadata))
+    return sharded_state_dict
+
+
+def copy_original_module_weight(model):
+    if hasattr(model, 'language_model'):
+        model = model.language_model
+    for module in model.modules():
+        if isinstance(module, ModulesToSaveWrapper):
+            original_module = module.original_module
+            default_module = module.modules_to_save['default']
+            original_module.load_state_dict(default_module.state_dict())
+
+
+def copy_ref_adapter_weight(model, ref_adapter_name: str):
+    from swift.megatron.tuners import LoraParallelLinear
+    for module in model.modules():
+        if isinstance(module, LoraParallelLinear):
+            for key in ['lora_A', 'lora_B']:
+                sub_module = getattr(module, key)
+                if 'default' in sub_module and ref_adapter_name in sub_module:
+                    sub_module[ref_adapter_name].load_state_dict(sub_module['default'].state_dict())
+            for key in ['lora_embedding_A', 'lora_embedding_B']:
+                sub_module = getattr(module, key)
+                if 'default' in sub_module and ref_adapter_name in sub_module:
+                    sub_module[ref_adapter_name].data.copy_(sub_module['default'])
+        elif isinstance(module, ModulesToSaveWrapper):
+            sub_module = module.modules_to_save
+            if 'default' in sub_module and ref_adapter_name in sub_module:
+                sub_module[ref_adapter_name].load_state_dict(sub_module['default'].state_dict())
+
+
 def forward_step_helper(model, inputs, dtype=None):
-    config = model.config
-    dtype = dtype or config.params_dtype
-    if not mpu.is_pipeline_first_stage():
+    args = get_args()
+    if mpu.is_pipeline_first_stage():
+        micro_batch_size = 1  # use qkv_format 'thd'
+        seq_length = inputs['input_ids'].shape[1]
+        if args.sequence_parallel:
+            seq_length //= mpu.get_tensor_model_parallel_world_size()
+        recv_shape_buffer = torch.tensor([seq_length, micro_batch_size, args.hidden_size],
+                                         device=torch.cuda.current_device(),
+                                         dtype=torch.int64)
+    else:
         recv_shape_buffer = torch.empty((3, ), device=torch.cuda.current_device(), dtype=torch.int64)
         recv_from_prev_pipeline_rank_(recv_shape_buffer)
-        recv_buffer = torch.empty(recv_shape_buffer.tolist(), device=torch.cuda.current_device(), dtype=dtype)
+    if not mpu.is_pipeline_last_stage():
+        send_to_next_pipeline_rank(recv_shape_buffer)
+    shape = recv_shape_buffer.tolist()
+
+    if not mpu.is_pipeline_first_stage():
+        dtype = dtype or args.params_dtype
+        recv_buffer = torch.empty(shape, device=torch.cuda.current_device(), dtype=dtype)
         recv_from_prev_pipeline_rank_(recv_buffer)
         model.set_input_tensor(recv_buffer)
     output_tensor = model(**inputs)
     if not mpu.is_pipeline_last_stage():
-        recv_shape_buffer = torch.tensor(output_tensor.shape, device=torch.cuda.current_device(), dtype=torch.int64)
-        send_to_next_pipeline_rank(recv_shape_buffer)
         send_to_next_pipeline_rank(output_tensor)
         output_tensor = None
 
@@ -212,88 +311,7 @@ def get_padding_to(args):
         padding_to = args.tensor_model_parallel_size
     if args.context_parallel_size > 1:
         padding_to = (padding_to or 1) * args.context_parallel_size
-    origin_padding_to = padding_to
     fp8_format = getattr(args, 'fp8_format', None) or getattr(args, 'fp8', None)
-    fp4_format = getattr(args, 'fp4_format', None) or getattr(args, 'fp4', None)
-    if args.fp8_recipe == 'blockwise':
-        padding_to = (padding_to or 1) * 128
-    elif args.fp8_recipe == 'mxfp8':
-        # MXFP8 uses a block size of 32. Under sequence parallel, the sequence is
-        # split across TP ranks, so each per-rank shard (seq_len / TP) must itself
-        # be divisible by 32. Pad the total length to TP * 32 to guarantee this.
-        padding_to = (padding_to or 1) * 32
-    elif fp8_format is not None or fp4_format is not None:
-        padding_to = (padding_to or 1) * 16
-    if args.attention_backend == 'fused':
-        padding_to = max(padding_to or 1, ((origin_padding_to) or 1) * 64)
+    if fp8_format is not None:
+        padding_to = max((padding_to or 1) * 8, 16)
     return padding_to
-
-
-def get_packed_seq_params(args, position_ids: torch.Tensor) -> PackedSeqParams:
-    params = _get_packed_seq_params(position_ids)
-    # max_seqlen must be a Python int rather than a 0-dim CUDA tensor.
-    # flash-attn 4 (CuTe DSL) embeds booleans derived from max_seqlen into its
-    # backward-kernel compile-cache key; a tensor there hashes by object identity,
-    # so the cache never hits and every micro-batch backward triggers a full JIT
-    # recompilation (~30s each), slowing training by >10x.
-    max_seqlen_q = params['max_length_q']
-    max_seqlen_kv = params['max_length_k']
-    if isinstance(max_seqlen_q, torch.Tensor):
-        max_seqlen_q = int(max_seqlen_q.item())
-    if isinstance(max_seqlen_kv, torch.Tensor):
-        max_seqlen_kv = int(max_seqlen_kv.item())
-    packed = PackedSeqParams(
-        cu_seqlens_q=params['cu_seq_lens_q'],
-        cu_seqlens_kv=params['cu_seq_lens_k'],
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_kv=max_seqlen_kv,
-        qkv_format='thd',
-    )
-    if hasattr(packed, 'total_tokens'):
-        packed.total_tokens = position_ids.numel()
-    if hasattr(packed, 'cp_partition_mode'):
-        packed.cp_partition_mode = args.cp_partition_mode
-
-    if is_torch_npu_available():
-        packed.cu_seqlens_q_padded = params['cu_seq_lens_q']
-        packed.cu_seqlens_kv_padded = params['cu_seq_lens_k']
-
-    return packed
-
-
-def reconstruct_tensor_cp(tensor, packed_seq_params, dim=1) -> torch.Tensor:
-    """In CP mode, all-gather and undo the load-balanced (zigzag) chunking
-    produced by ``split_cp_inputs``, restoring the full sequence in original
-    token order along ``dim``.
-
-    Args:
-        tensor: CP-sharded local tensor whose sequence dim is at ``dim``.
-        packed_seq_params: ``PackedSeqParams`` for THD inputs, or ``None`` for
-            regular ``[B, S, ...]`` inputs.
-        dim: Sequence dimension index of ``tensor`` (default: 1).
-
-    Returns:
-        torch.Tensor: Full-sequence tensor with the same shape as ``tensor``
-        except the size at ``dim`` is multiplied by ``cp_size``.
-    """
-
-    cp_size = mpu.get_context_parallel_world_size()
-    if cp_size <= 1:
-        return tensor
-
-    cp_rank = mpu.get_context_parallel_rank()
-    cp_group = mpu.get_context_parallel_group()
-
-    # All-gather across CP ranks (preserve local autograd graph for `tensor`).
-    output_list = [torch.empty_like(tensor) for _ in range(cp_size)]
-    torch.distributed.all_gather(output_list, tensor.contiguous(), group=cp_group)
-    output_list[cp_rank] = tensor
-    gathered = torch.cat(output_list, dim=dim)
-
-    # `_undo_attention_load_balancing` assumes sequence dim is 0; transpose if needed.
-    if dim != 0:
-        gathered = gathered.transpose(0, dim).contiguous()
-    out = _undo_attention_load_balancing(gathered, cp_size, packed_seq_params)
-    if dim != 0:
-        out = out.transpose(0, dim).contiguous()
-    return out

@@ -1,5 +1,6 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import os
+
 from openai import OpenAI
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
@@ -32,7 +33,7 @@ def run_client(host: str = '127.0.0.1', port: int = 8000):
 
 
 if __name__ == '__main__':
-    from swift import DeployArguments, run_deploy
+    from swift.llm import run_deploy, DeployArguments
     with run_deploy(
             DeployArguments(
                 model='/your/seq_cls/checkpoint-xxx',

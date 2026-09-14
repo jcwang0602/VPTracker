@@ -1,9 +1,10 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 
+import gradio as gr
+
+from swift.ui.llm_train.runtime import Runtime
 from swift.utils import get_logger
-from ..llm_train import Runtime
 
 logger = get_logger()
 

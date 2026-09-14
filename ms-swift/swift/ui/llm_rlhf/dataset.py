@@ -1,5 +1,5 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-from ..llm_train import Dataset
+# Copyright (c) Alibaba, Inc. and its affiliates.
+from swift.ui.llm_train.dataset import Dataset
 
 
 class RLHFDataset(Dataset):

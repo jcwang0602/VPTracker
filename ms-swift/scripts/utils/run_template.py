@@ -1,4 +1,4 @@
-from swift.template import TemplateType
+from swift.llm import TemplateType
 
 if __name__ == '__main__':
     template_name_list = TemplateType.get_template_name_list()

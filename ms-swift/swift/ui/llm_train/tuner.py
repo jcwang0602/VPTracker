@@ -1,10 +1,11 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from typing import Type
 
-from ..base import BaseUI
-from .lora import LoRA
-from .target import Target
+import gradio as gr
+
+from swift.ui.base import BaseUI
+from swift.ui.llm_train.lora import LoRA
+from swift.ui.llm_train.target import Target
 
 
 class Tuner(BaseUI):

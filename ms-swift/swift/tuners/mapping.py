@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 
 from .adapter import Adapter, AdapterConfig
 from .llamapro import LLaMAPro, LLaMAProConfig

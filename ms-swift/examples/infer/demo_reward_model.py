@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 from typing import List
 
@@ -12,9 +12,9 @@ def infer_batch(engine: 'InferEngine', infer_requests: List['InferRequest']):
 
 
 if __name__ == '__main__':
-    from swift import InferEngine, InferRequest, TransformersEngine, load_dataset
+    from swift.llm import InferEngine, InferRequest, PtEngine, load_dataset
     model = 'Shanghai_AI_Laboratory/internlm2-1_8b-reward'
-    engine = TransformersEngine(model, max_batch_size=64)
+    engine = PtEngine(model, max_batch_size=64)
     # Here, `load_dataset` is used for convenience; `infer_batch` does not require creating a dataset.
     dataset = load_dataset(['AI-ModelScope/alpaca-gpt4-data-zh#1000'], seed=42)[0]
     print(f'dataset: {dataset}')

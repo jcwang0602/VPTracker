@@ -1,2 +1,1 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-from .llm_export import LLMExport
+# Copyright (c) Alibaba, Inc. and its affiliates.

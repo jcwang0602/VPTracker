@@ -6,7 +6,7 @@ import os
 class TNL2KDataset(torch.utils.data.Dataset[dict[str, Any]]):
     def __init__(
         self,
-        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPTrack/data/tnl2k/test",
+        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPLT/data/tnl2k/test",
         finished_videos=[],
         seg_index=None,
         seg_total=1,
@@ -15,9 +15,7 @@ class TNL2KDataset(torch.utils.data.Dataset[dict[str, Any]]):
         self.dataset_name = "tnl2k"
         self.root_dir = root_dir
         # 获取所有的视频名称
-        # Deterministic ordering keeps independently scheduled shards stable
-        # when multiple sequences have the same number of frames.
-        self.video_names = sorted(os.listdir(root_dir))
+        self.video_names = os.listdir(root_dir)
         # 过滤掉已经跑完的视频
         self.video_names = [
             video_name
@@ -71,13 +69,12 @@ class TNL2KDataset(torch.utils.data.Dataset[dict[str, Any]]):
             "language": language,
             "bboxes": bbox,
             "target_visible": target_visible,
-            "language_path": language_path,
         }
 
 
 if __name__ == "__main__":
     dataset = TNL2KDataset(
-        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPTrack/data/tnl2k",
+        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPLT/data/tnl2k",
         finished_videos=["CartoonXiYouJi_video_03"],
     )
     for i in range(len(dataset)):

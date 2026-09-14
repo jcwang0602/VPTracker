@@ -1,10 +1,10 @@
 # sh examples/custom/sft.sh
 CUDA_VISIBLE_DEVICES=0 \
 swift sft \
-    --external_plugins examples/custom/dataset.py \
-                       examples/custom/model.py \
+    --custom_register_path examples/custom/dataset.py \
+                           examples/custom/model.py \
     --model AI-ModelScope/Nemotron-Mini-4B-Instruct \
-    --tuner_type lora \
+    --train_type lora \
     --dataset swift/stsb \
     --split_dataset_ratio 0.01 \
     --num_train_epochs 3 \

@@ -1,7 +1,7 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 
 if __name__ == '__main__':
-    from swift.ray_utils import try_init_ray
+    from swift.ray import try_init_ray
     try_init_ray()
-    from swift.pipelines import sampling_main
+    from swift.llm.sampling import sampling_main
     sampling_main()

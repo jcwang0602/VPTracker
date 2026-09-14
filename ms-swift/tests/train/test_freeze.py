@@ -1,7 +1,7 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
+
 kwargs = {
     'per_device_train_batch_size': 2,
     'save_steps': 5,
@@ -14,14 +14,13 @@ def test_full_vit():
     os.environ['MAX_PIXELS'] = '100352'
     os.environ['SIZE_FACTOR'] = '12'
     os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
-    from swift import InferArguments, SftArguments, infer_main, sft_main
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
     sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2-VL-7B-Instruct',
             dataset=['modelscope/coco_2014_caption:validation#20', 'AI-ModelScope/alpaca-gpt4-data-en#20'],
             split_dataset_ratio=0.01,
-            tuner_type='full',
+            train_type='full',
             freeze_llm=True,
             freeze_vit=False,
             freeze_aligner=True,
@@ -32,14 +31,13 @@ def test_full_aligner():
     os.environ['MAX_PIXELS'] = '100352'
     os.environ['SIZE_FACTOR'] = '12'
     os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
-    from swift import InferArguments, SftArguments, infer_main, sft_main
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
     sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2-VL-7B-Instruct',
             dataset=['modelscope/coco_2014_caption:validation#20', 'AI-ModelScope/alpaca-gpt4-data-en#20'],
             split_dataset_ratio=0.01,
-            tuner_type='full',
+            train_type='full',
             freeze_llm=True,
             freeze_vit=True,
             freeze_aligner=False,
@@ -50,14 +48,13 @@ def test_lora_vit():
     os.environ['MAX_PIXELS'] = '100352'
     os.environ['SIZE_FACTOR'] = '12'
     os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
-    from swift import InferArguments, SftArguments, infer_main, sft_main
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
     sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2-VL-7B-Instruct',
             dataset=['modelscope/coco_2014_caption:validation#20', 'AI-ModelScope/alpaca-gpt4-data-en#20'],
             split_dataset_ratio=0.01,
-            tuner_type='lora',
+            train_type='lora',
             freeze_llm=True,
             freeze_vit=False,
             freeze_aligner=True,
@@ -68,14 +65,13 @@ def test_lora_aligner():
     os.environ['MAX_PIXELS'] = '100352'
     os.environ['SIZE_FACTOR'] = '12'
     os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
-    from swift import InferArguments, SftArguments, infer_main, sft_main
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
     sft_main(
-        SftArguments(
+        TrainArguments(
             model='Qwen/Qwen2-VL-7B-Instruct',
             dataset=['modelscope/coco_2014_caption:validation#20', 'AI-ModelScope/alpaca-gpt4-data-en#20'],
             split_dataset_ratio=0.01,
-            tuner_type='lora',
+            train_type='lora',
             freeze_llm=True,
             freeze_vit=True,
             freeze_aligner=False,

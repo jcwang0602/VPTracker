@@ -1,11 +1,12 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
-from packaging import version
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from typing import Type
 
+import gradio as gr
+from packaging import version
+
+from swift.ui.base import BaseUI
+from swift.ui.llm_infer.runtime import Runtime
 from swift.utils import get_logger
-from ..base import BaseUI
-from ..llm_infer import Runtime
 
 logger = get_logger()
 

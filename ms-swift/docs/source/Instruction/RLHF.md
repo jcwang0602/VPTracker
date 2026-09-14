@@ -61,7 +61,7 @@ $
 - $m$: margin项，鼓励模型根据不同难度的样本进行区分，需要数据集中提供`margin`列，默认为0，来自[论文](https://arxiv.org/pdf/2307.09288)
 
 
-训练脚本参考[这里](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/rm).
+训练脚本参考[这里](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/rm.sh).
 
 ## PPO
 [论文arvix](https://arxiv.org/abs/2203.02155)
@@ -85,7 +85,7 @@ RLHF中的PPO(proximal policy optimization)阶段, 涉及到四个模型
 - num_sample_generations: 训练过程中生成的调试样本数量, 默认为10
 
 
-注意: 训练base model时, 需要先sft后再进行rlhf, 指定chat template, `tuner_type` 建议使用full
+注意: 训练base model时, 需要先sft后再进行rlhf, 指定chat template, sft_type建议使用full
 
 训练中的指标解释参考[文档](https://huggingface.co/docs/trl/ppov2_trainer#explanation-of-the-logged-metrics)
 

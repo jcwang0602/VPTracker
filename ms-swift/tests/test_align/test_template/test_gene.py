@@ -1,18 +1,19 @@
 import os
 
+import torch
+
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
 os.environ['SWIFT_DEBUG'] = '1'
 
 
 def test_deepseek_janus_pro_gene():
-    from swift import InferArguments, infer_main
-    args = InferArguments(model='deepseek-ai/Janus-Pro-1B', infer_backend='transformers')
+    from swift.llm import infer_main, InferArguments
+    args = InferArguments(model='deepseek-ai/Janus-Pro-1B', infer_backend='pt')
     infer_main(args)
 
 
 def test_emu3_gen(infer_backend):
-    from swift import InferArguments, infer_main
+    from swift.llm import infer_main, InferArguments
     args = InferArguments(
         model='BAAI/Emu3-Gen',
         infer_backend=infer_backend,
@@ -24,5 +25,5 @@ def test_emu3_gen(infer_backend):
 
 
 if __name__ == '__main__':
-    # test_emu3_gen('transformers')
+    # test_emu3_gen('pt')
     test_deepseek_janus_pro_gene()

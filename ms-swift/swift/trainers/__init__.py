@@ -1,32 +1,46 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from typing import TYPE_CHECKING
 
+from transformers.trainer_callback import TrainerCallback
+from transformers.trainer_utils import FSDPOption, HPSearchBackend, HubStrategy, IntervalStrategy, SchedulerType
+
 from swift.utils.import_utils import _LazyModule
-from . import patcher
+from . import callback
+
+try:
+    # https://github.com/huggingface/transformers/pull/25702
+    from transformers.trainer_utils import ShardedDDPOption
+except ImportError:
+    ShardedDDPOption = None
 
 if TYPE_CHECKING:
-    from .arguments import Seq2SeqTrainingArguments, TrainArgumentsMixin, TrainingArguments
-    from .embedding_trainer import EmbeddingTrainer
-    from .mixin import DataLoaderMixin, SwiftMixin
-    from .reranker_trainer import RerankerTrainer
-    from .seq2seq_trainer import Seq2SeqTrainer
-    from .trainer import Trainer
+    from .arguments import (Seq2SeqTrainingArguments, TrainingArguments, RLHFArgumentsMixin, VllmArguments,
+                            GRPOArgumentsMixin, RolloutTrainerArgumentsMixin)
+    from .rlhf_trainer import (CPOTrainer, DPOTrainer, KTOTrainer, ORPOTrainer, RLHFTrainerMixin, PPOTrainer,
+                               RewardTrainer, GRPOTrainer, GKDTrainer)
+    from .rlhf_arguments import DPOConfig, CPOConfig, KTOConfig, ORPOConfig, PPOConfig, RewardConfig, GKDConfig
     from .trainer_factory import TrainerFactory
-    from .utils import (calculate_max_steps, disable_gradient_checkpointing, dynamic_gradient_checkpointing,
-                        per_token_loss_func)
+    from .trainers import Seq2SeqTrainer, Trainer, EmbeddingTrainer, RerankerTrainer
+    from .mixin import SwiftMixin
+    from .utils import per_token_loss_func
+
 else:
+    _extra_objects = {k: v for k, v in globals().items() if not k.startswith('_')}
     _import_structure = {
-        'arguments': ['TrainArgumentsMixin', 'Seq2SeqTrainingArguments', 'TrainingArguments'],
-        'embedding_trainer': ['EmbeddingTrainer'],
-        'mixin': ['DataLoaderMixin', 'SwiftMixin'],
-        'reranker_trainer': ['RerankerTrainer'],
-        'seq2seq_trainer': ['Seq2SeqTrainer'],
-        'trainer': ['Trainer'],
+        'arguments': [
+            'Seq2SeqTrainingArguments', 'TrainingArguments', 'RLHFArgumentsMixin', 'VllmArguments',
+            'GRPOArgumentsMixin', 'RolloutTrainerArgumentsMixin'
+        ],
+        'rlhf_arguments':
+        ['DPOConfig', 'CPOConfig', 'KTOConfig', 'ORPOConfig', 'PPOConfig', 'RewardConfig', 'GRPOConfig', 'GKDConfig'],
+        'rlhf_trainer': [
+            'CPOTrainer', 'DPOTrainer', 'KTOTrainer', 'ORPOTrainer', 'RLHFTrainerMixin', 'PPOTrainer', 'RewardTrainer',
+            'GRPOTrainer', 'GKDTrainer'
+        ],
         'trainer_factory': ['TrainerFactory'],
-        'utils': [
-            'disable_gradient_checkpointing', 'dynamic_gradient_checkpointing', 'per_token_loss_func',
-            'calculate_max_steps'
-        ]
+        'trainers': ['Seq2SeqTrainer', 'Trainer', 'EmbeddingTrainer', 'RerankerTrainer'],
+        'mixin': ['SwiftMixin'],
+        'utils': ['per_token_loss_func'],
     }
 
     import sys
@@ -36,5 +50,5 @@ else:
         globals()['__file__'],
         _import_structure,
         module_spec=__spec__,
-        extra_objects={},
+        extra_objects=_extra_objects,
     )

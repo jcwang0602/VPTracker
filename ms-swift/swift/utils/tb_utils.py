@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 
 import os
 from typing import Dict, List, Optional, Tuple
@@ -48,15 +48,8 @@ def plot_images(images_dir: str,
         return
     smooth_key = smooth_key or []
     os.makedirs(images_dir, exist_ok=True)
-
-    matches = []
-    for root, dirs, files in os.walk(tb_dir):
-        for f in files:
-            if f.startswith('events.out.tfevents.'):
-                matches.append(os.path.join(root, f))
-    if not matches:
-        return
-    tb_path = matches[0]
+    fname = [fname for fname in os.listdir(tb_dir) if os.path.isfile(os.path.join(tb_dir, fname))][0]
+    tb_path = os.path.join(tb_dir, fname)
     data = read_tensorboard_file(tb_path)
 
     for k in data.keys():

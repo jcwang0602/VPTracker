@@ -1,1 +1,1 @@
-swift sample examples/sampler/sample/sampling.yaml
+swift sample --config sampling.yaml

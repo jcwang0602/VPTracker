@@ -1,12 +1,12 @@
 import os
+
 import torch
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1,2,3'
 os.environ['SWIFT_DEBUG'] = '1'
 
 
-def _infer_model(engine, system=None, messages=None, images=None, **kwargs):
+def _infer_model(pt_engine, system=None, messages=None, images=None, **kwargs):
     seed_everything(42)
     max_tokens = kwargs.get('max_tokens', 128)
     request_config = RequestConfig(max_tokens=max_tokens, temperature=0, repetition_penalty=1)
@@ -15,33 +15,33 @@ def _infer_model(engine, system=None, messages=None, images=None, **kwargs):
         if system is not None:
             messages += [{'role': 'system', 'content': system}]
         messages += [{'role': 'user', 'content': '你好'}]
-        resp = engine.infer([{'messages': messages}], request_config=request_config)
+        resp = pt_engine.infer([{'messages': messages}], request_config=request_config)
         response = resp[0].choices[0].message.content
         messages += [{'role': 'assistant', 'content': response}, {'role': 'user', 'content': '<image>这是什么'}]
     else:
         messages = messages.copy()
     if images is None:
         images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
-    resp = engine.infer([{'messages': messages, 'images': images, **kwargs}], request_config=request_config)
+    resp = pt_engine.infer([{'messages': messages, 'images': images, **kwargs}], request_config=request_config)
     response = resp[0].choices[0].message.content
     messages += [{'role': 'assistant', 'content': response}]
-    logger.info(f'model: {engine.model_info.model_name}, messages: {messages}')
+    logger.info(f'model: {pt_engine.model_info.model_name}, messages: {messages}')
     return response
 
 
 def test_qwen2_vl():
-    engine = TransformersEngine('Qwen/Qwen2-VL-2B-Instruct')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('Qwen/Qwen2-VL-2B-Instruct')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2 == '这是一只小猫的图片。它有黑白相间的毛发，眼睛大而圆，显得非常可爱。'
 
 
 def test_qwen2_5_vl_batch_infer():
     from qwen_vl_utils import process_vision_info
-    engine = TransformersEngine('Qwen/Qwen2.5-VL-7B-Instruct', max_batch_size=2)
+    pt_engine = PtEngine('Qwen/Qwen2.5-VL-7B-Instruct', max_batch_size=2)
     request_config = RequestConfig(max_tokens=128, temperature=0)
-    resp = engine.infer([{
+    resp = pt_engine.infer([{
         'messages': [{
             'role': 'user',
             'content': '<image>What kind of dog is this?'
@@ -54,10 +54,10 @@ def test_qwen2_5_vl_batch_infer():
         }],
         'videos': ['https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/baby.mp4']
     }],
-                        request_config=request_config)
+                           request_config=request_config)
     response_list = [resp[0].choices[0].message.content, resp[1].choices[0].message.content]
-    model = engine.model
-    template = engine.template
+    model = pt_engine.model
+    template = pt_engine.default_template
     processor = template.processor
     messages1 = [{
         'role':
@@ -110,10 +110,10 @@ def test_qwen2_5_vl_batch_infer():
 
 
 def test_qwen2_5_omni():
-    engine = TransformersEngine('Qwen/Qwen2.5-Omni-7B')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('Qwen/Qwen2.5-Omni-7B')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
@@ -132,9 +132,9 @@ def _run_qwen3_omni_hf(model, processor, messages):
 def test_qwen3_omni():
     query = 'describe the image.'
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
-    engine = TransformersEngine('Qwen/Qwen3-Omni-30B-A3B-Thinking')
+    pt_engine = PtEngine('Qwen/Qwen3-Omni-30B-A3B-Thinking')
     messages = [{'role': 'user', 'content': query}]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     messages = [
         {
             'role': 'user',
@@ -150,16 +150,16 @@ def test_qwen3_omni():
             ],
         },
     ]
-    response2 = _run_qwen3_omni_hf(engine.model, engine.processor, messages)
+    response2 = _run_qwen3_omni_hf(pt_engine.model, pt_engine.processor, messages)
     assert response == response2
 
 
 def test_qwen3_omni_audio():
     query = 'describe the audio.'
     audios = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/weather.wav']
-    engine = TransformersEngine('Qwen/Qwen3-Omni-30B-A3B-Instruct')
+    pt_engine = PtEngine('Qwen/Qwen3-Omni-30B-A3B-Instruct')
     messages = [{'role': 'user', 'content': query}]
-    response = _infer_model(engine, messages=messages, images=[], audios=audios)
+    response = _infer_model(pt_engine, messages=messages, images=[], audios=audios)
     messages = [
         {
             'role': 'user',
@@ -175,66 +175,66 @@ def test_qwen3_omni_audio():
             ],
         },
     ]
-    response2 = _run_qwen3_omni_hf(engine.model, engine.processor, messages)
+    response2 = _run_qwen3_omni_hf(pt_engine.model, pt_engine.processor, messages)
     assert response == response2[:len(response)]
 
 
 def test_qvq():
-    engine = TransformersEngine('Qwen/QVQ-72B-Preview')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('Qwen/QVQ-72B-Preview')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
 def test_internvl2():
-    engine = TransformersEngine('OpenGVLab/InternVL2-2B')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('OpenGVLab/InternVL2-2B')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
 def test_internvl2_phi3():
-    engine = TransformersEngine('OpenGVLab/Mini-InternVL-Chat-4B-V1-5')
-    _infer_model(engine, system='')
-    engine.template.template_backend = 'jinja'
-    _infer_model(engine, system='')
+    pt_engine = PtEngine('OpenGVLab/Mini-InternVL-Chat-4B-V1-5')
+    _infer_model(pt_engine, system='')
+    pt_engine.default_template.template_backend = 'jinja'
+    _infer_model(pt_engine, system='')
 
 
 def test_internvl3_8b():
-    engine = TransformersEngine('OpenGVLab/InternVL3-8B')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, system='你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。')
+    pt_engine = PtEngine('OpenGVLab/InternVL3-8B')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, system='你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。')
     assert response == response2
 
 
 def test_internvl3_9b():
-    engine = TransformersEngine('OpenGVLab/InternVL3-9B')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, system='你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。')
+    pt_engine = PtEngine('OpenGVLab/InternVL3-9B')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, system='你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。')
     assert response == response2
 
 
 def test_llava():
-    engine = TransformersEngine('AI-ModelScope/llava-v1.6-mistral-7b')
-    _infer_model(engine)
+    pt_engine = PtEngine('AI-ModelScope/llava-v1.6-mistral-7b')
+    _infer_model(pt_engine)
 
 
 def test_yi_vl():
-    engine = TransformersEngine('01ai/Yi-VL-6B')
-    _infer_model(engine)
+    pt_engine = PtEngine('01ai/Yi-VL-6B')
+    _infer_model(pt_engine)
 
 
 def test_glm4v():
     # There will be differences in '\n'. This is normal.
-    engine = TransformersEngine('ZhipuAI/glm-4v-9b')
+    pt_engine = PtEngine('ZhipuAI/glm-4v-9b')
     messages = [{'role': 'user', 'content': '描述这张图片'}]
-    response = _infer_model(engine, messages=messages)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages)
+    response = _infer_model(pt_engine, messages=messages)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages)
     assert response == ('这张图片是一只小猫的特写，它有着非常醒目的蓝色眼睛和混合了灰色、白色和棕色毛发的皮毛。小猫的耳朵竖立着，胡须清晰可见。它的眼神看起来既好奇又警觉，整体上显得非常可爱。')
     assert response2 == ('这是一张特写照片，展示了一只毛茸茸的小猫。小猫的眼睛大而圆，呈深蓝色，眼珠呈金黄色，非常明亮。它的鼻子短而小巧，'
                          '是粉色的。小猫的嘴巴紧闭，胡须细长。它的耳朵竖立着，耳朵内侧是白色的，外侧是棕色的。小猫的毛发看起来柔软而浓密，'
@@ -242,7 +242,7 @@ def test_glm4v():
 
 
 def test_cogagent():
-    engine = TransformersEngine('ZhipuAI/cogagent-9b-20241220')
+    pt_engine = PtEngine('ZhipuAI/cogagent-9b-20241220')
     messages = [{
         'role':
         'user',
@@ -253,9 +253,9 @@ History steps:
 (Answer in Action-Operation-Sensitive format.)"""
     }]
     images = ['https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/agent.png']
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2 == (
         """Action: Click on the 'Adobe Photoshop 2023' icon located in the middle of the screen to open the application.
 Grounded Operation: CLICK(box=[[346,574,424,710]], element_type='卡片', element_info='Adobe Photoshop 2023')
@@ -263,16 +263,16 @@ Grounded Operation: CLICK(box=[[346,574,424,710]], element_type='卡片', elemen
 
 
 def test_minicpmv():
-    # engine = TransformersEngine('OpenBMB/MiniCPM-V-2_6')
+    # pt_engine = PtEngine('OpenBMB/MiniCPM-V-2_6')
     messages = [{'role': 'user', 'content': '<image>descibe the picture?'}]
-    engine = TransformersEngine('OpenBMB/MiniCPM-V-4')
-    response = _infer_model(engine, messages=messages)
+    pt_engine = PtEngine('OpenBMB/MiniCPM-V-4')
+    response = _infer_model(pt_engine, messages=messages)
     assert response[:100] == ('The image features a close-up of a kitten with a soft and fluffy appearance. '
                               'The kitten has a striki')
 
 
 def test_minicpmo():
-    engine = TransformersEngine('OpenBMB/MiniCPM-o-2_6')
+    pt_engine = PtEngine('OpenBMB/MiniCPM-o-2_6')
     messages = [{
         'role':
         'user',
@@ -283,9 +283,9 @@ def test_minicpmo():
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2 == (
         'The main difference between image 1 and image 2 is the subject matter. '
         'Image 1 features a close-up of a kitten, while image 2 depicts a cartoon illustration of four sheep '
@@ -295,9 +295,9 @@ def test_minicpmo():
 
 def test_got_ocr():
     # https://github.com/modelscope/ms-swift/issues/2122
-    engine = TransformersEngine('stepfun-ai/GOT-OCR2_0')
+    pt_engine = PtEngine('stepfun-ai/GOT-OCR2_0')
     _infer_model(
-        engine,
+        pt_engine,
         messages=[{
             'role': 'user',
             'content': 'OCR: '
@@ -306,9 +306,9 @@ def test_got_ocr():
 
 
 def test_got_ocr_hf():
-    engine = TransformersEngine('stepfun-ai/GOT-OCR-2.0-hf')
+    pt_engine = PtEngine('stepfun-ai/GOT-OCR-2.0-hf')
     response = _infer_model(
-        engine,
+        pt_engine,
         messages=[{
             'role': 'user',
             'content': 'OCR: '
@@ -321,27 +321,27 @@ def test_got_ocr_hf():
 
 
 def test_llama_vision():
-    engine = TransformersEngine('LLM-Research/Llama-3.2-11B-Vision-Instruct')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('LLM-Research/Llama-3.2-11B-Vision-Instruct')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
 def test_llava_hf():
-    engine = TransformersEngine('llava-hf/llava-v1.6-mistral-7b-hf')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('llava-hf/llava-v1.6-mistral-7b-hf')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
 def test_florence():
-    engine = TransformersEngine('AI-ModelScope/Florence-2-base-ft')
-    _infer_model(engine, messages=[{'role': 'user', 'content': 'who are you?'}], images=[])
+    pt_engine = PtEngine('AI-ModelScope/Florence-2-base-ft')
+    _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'who are you?'}], images=[])
 
     response = _infer_model(
-        engine,
+        pt_engine,
         messages=[{
             'role': 'user',
             'content': '<OD>'
@@ -351,117 +351,117 @@ def test_florence():
 
 
 def test_phi3_vision():
-    # engine = TransformersEngine('LLM-Research/Phi-3-vision-128k-instruct')
-    engine = TransformersEngine('LLM-Research/Phi-3.5-vision-instruct')
-    _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    _infer_model(engine)
+    # pt_engine = PtEngine('LLM-Research/Phi-3-vision-128k-instruct')
+    pt_engine = PtEngine('LLM-Research/Phi-3.5-vision-instruct')
+    _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    _infer_model(pt_engine)
 
 
 def test_qwen_vl():
-    engine = TransformersEngine('Qwen/Qwen-VL-Chat')
-    _infer_model(engine)
+    pt_engine = PtEngine('Qwen/Qwen-VL-Chat')
+    _infer_model(pt_engine)
 
 
 def test_llava_onevision_hf():
-    engine = TransformersEngine('llava-hf/llava-onevision-qwen2-0.5b-ov-hf')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('llava-hf/llava-onevision-qwen2-0.5b-ov-hf')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
 def test_xcomposer2_5():
-    engine = TransformersEngine('Shanghai_AI_Laboratory/internlm-xcomposer2d5-ol-7b:base', torch.float16)
-    # engine = TransformersEngine('Shanghai_AI_Laboratory/internlm-xcomposer2d5-7b')
-    response = _infer_model(engine, system='')
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('Shanghai_AI_Laboratory/internlm-xcomposer2d5-ol-7b:base', torch.float16)
+    # pt_engine = PtEngine('Shanghai_AI_Laboratory/internlm-xcomposer2d5-7b')
+    response = _infer_model(pt_engine, system='')
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
 def test_deepseek_vl():
-    # engine = TransformersEngine('deepseek-ai/deepseek-vl-1.3b-chat')
-    engine = TransformersEngine('deepseek-ai/Janus-1.3B')
-    _infer_model(engine)
+    # pt_engine = PtEngine('deepseek-ai/deepseek-vl-1.3b-chat')
+    pt_engine = PtEngine('deepseek-ai/Janus-1.3B')
+    _infer_model(pt_engine)
 
 
 def test_deepseek_janus():
-    engine = TransformersEngine('deepseek-ai/Janus-Pro-7B')
+    pt_engine = PtEngine('deepseek-ai/Janus-Pro-7B')
     messages = [{'role': 'user', 'content': '描述图片'}]
-    response = _infer_model(engine, messages=messages)
+    response = _infer_model(pt_engine, messages=messages)
     assert response == ('这是一张非常可爱的猫咪图片。猫咪的毛色主要是白色，并带有灰色的条纹。它的眼睛非常大，呈现出明亮的蓝色，'
                         '显得非常可爱和无辜。猫咪的耳朵竖立着，显得非常警觉和好奇。背景模糊，使得猫咪成为图片的焦点。'
                         '整体画面给人一种温暖和愉悦的感觉。')
 
 
 def test_deepseek_vl2():
-    engine = TransformersEngine('deepseek-ai/deepseek-vl2-small')
-    response = _infer_model(engine)
+    pt_engine = PtEngine('deepseek-ai/deepseek-vl2-small')
+    response = _infer_model(pt_engine)
     assert response == ('这是一只可爱的小猫。它有着大大的蓝色眼睛和柔软的毛发，看起来非常天真无邪。小猫的耳朵竖立着，显得非常警觉和好奇。'
                         '它的鼻子小巧而粉红，嘴巴微微张开，似乎在探索周围的环境。整体来看，这只小猫非常可爱，充满了活力和好奇心。')
 
 
 def test_mplug_owl2():
-    # engine = TransformersEngine('iic/mPLUG-Owl2')
-    engine = TransformersEngine('iic/mPLUG-Owl2.1')
-    _infer_model(engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
+    # pt_engine = PtEngine('iic/mPLUG-Owl2')
+    pt_engine = PtEngine('iic/mPLUG-Owl2.1')
+    _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
 
 
 def test_mplug_owl3():
-    # engine = TransformersEngine('iic/mPLUG-Owl3-7B-240728')
-    engine = TransformersEngine('iic/mPLUG-Owl3-7B-241101')
-    response = _infer_model(engine, system='')
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, system='')
+    # pt_engine = PtEngine('iic/mPLUG-Owl3-7B-240728')
+    pt_engine = PtEngine('iic/mPLUG-Owl3-7B-241101')
+    response = _infer_model(pt_engine, system='')
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, system='')
     assert response == response2
 
 
 def test_ovis1_6():
-    engine = TransformersEngine('AIDC-AI/Ovis1.6-Gemma2-9B')
-    # engine = TransformersEngine('AIDC-AI/Ovis1.6-Gemma2-27B')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine)
+    pt_engine = PtEngine('AIDC-AI/Ovis1.6-Gemma2-9B')
+    # pt_engine = PtEngine('AIDC-AI/Ovis1.6-Gemma2-27B')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
     assert response == response2
 
 
 def test_ovis1_6_llama3():
-    engine = TransformersEngine('AIDC-AI/Ovis1.6-Llama3.2-3B')
+    pt_engine = PtEngine('AIDC-AI/Ovis1.6-Llama3.2-3B')
     messages = [{'role': 'user', 'content': '这是什么'}]
     # llama3
-    response = _infer_model(engine, messages=messages)
-    engine.template.template_backend = 'jinja'
+    response = _infer_model(pt_engine, messages=messages)
+    pt_engine.default_template.template_backend = 'jinja'
     # llama3_2
-    _infer_model(engine, messages=messages, system='You are a helpful and honest multimodal assistant.')
+    _infer_model(pt_engine, messages=messages, system='You are a helpful and honest multimodal assistant.')
     assert response == '这是一只小猫。从图中可见的特征如大眼睛、细长的白色鼻毛和毛发的图案，表明它可能属于常见的猫种。猫的表情和毛发的质感显示出它年轻，可能是幼猫。'
 
 
 def test_ovis2():
-    engine = TransformersEngine('AIDC-AI/Ovis2-2B')  # with flash_attn
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'Describe the image.'}])
+    pt_engine = PtEngine('AIDC-AI/Ovis2-2B')  # with flash_attn
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'Describe the image.'}])
     assert response[:200] == ('The image features a close-up portrait of a young kitten with striking blue eyes. '
                               'The kitten has a distinctive coat pattern with a mix of gray, black, and white fur, '
                               'typical of a tabby pattern. Its ea')
 
 
 def test_ovis2_5():
-    engine = TransformersEngine('AIDC-AI/Ovis2.5-2B')  # with flash_attn
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'Describe the image.'}])
+    pt_engine = PtEngine('AIDC-AI/Ovis2.5-2B')  # with flash_attn
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'Describe the image.'}])
     assert response[:100] == ('<think>\n用户现在需要描述这张图片。首先看主体是一只小猫，风格是卡通或艺术化处理，'
                               '毛发有模糊效果，显得柔和。颜色方面，小猫的毛色是灰白相间，有深色条纹，耳朵内侧粉色，'
                               '眼睛大而圆，蓝色，瞳孔黑色，')
 
 
 def test_paligemma():
-    engine = TransformersEngine('AI-ModelScope/paligemma-3b-mix-224')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'detect cat'}])
+    pt_engine = PtEngine('AI-ModelScope/paligemma-3b-mix-224')
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'detect cat'}])
     assert response == '<loc0000><loc0000><loc1022><loc1022> cat'
 
 
 def test_paligemma2():
-    engine = TransformersEngine('AI-ModelScope/paligemma2-3b-ft-docci-448', torch_dtype=torch.bfloat16)
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'caption en'}])
+    pt_engine = PtEngine('AI-ModelScope/paligemma2-3b-ft-docci-448', torch_dtype=torch.bfloat16)
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'caption en'}])
     assert response == (
         'A close up view of a white and gray kitten with black stripes on its head and face staring forward with '
         'its light blue eyes. The kitten is sitting on a white surface with a blurry background. '
@@ -469,36 +469,36 @@ def test_paligemma2():
 
 
 def test_pixtral():
-    engine = TransformersEngine('AI-ModelScope/pixtral-12b')
-    _infer_model(engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
+    pt_engine = PtEngine('AI-ModelScope/pixtral-12b')
+    _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
 
 
 def test_glm_edge_v():
-    engine = TransformersEngine('ZhipuAI/glm-edge-v-2b')
-    _infer_model(engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
+    pt_engine = PtEngine('ZhipuAI/glm-edge-v-2b')
+    _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
 
 
 def test_internvl2_5():
-    engine = TransformersEngine('OpenGVLab/InternVL2_5-26B')
-    _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    _infer_model(engine, system='你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。')
+    pt_engine = PtEngine('OpenGVLab/InternVL2_5-26B')
+    _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    _infer_model(pt_engine, system='你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。')
 
 
 def test_internvl2_5_mpo():
-    engine = TransformersEngine('OpenGVLab/InternVL2_5-1B-MPO', model_type='internvl2_5')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'Hello, who are you?'}], images=[])
+    pt_engine = PtEngine('OpenGVLab/InternVL2_5-1B-MPO', model_type='internvl2_5')
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'Hello, who are you?'}], images=[])
     assert response == ("Hello! I'm an AI assistant whose name is InternVL, developed jointly by Shanghai AI Lab, "
                         'Tsinghua University and other partners.')
-    response2 = _infer_model(engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
+    response2 = _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
     assert response2 == ('这是一只小猫的特写照片。照片中的小猫有大大的蓝色眼睛和毛发，看起来非常可爱。这种照片通常用于展示宠物的可爱瞬间。')
 
 
 def test_megrez_omni():
-    engine = TransformersEngine('InfiniAI/Megrez-3B-Omni')
-    _infer_model(engine)
+    pt_engine = PtEngine('InfiniAI/Megrez-3B-Omni')
+    _infer_model(pt_engine)
     response = _infer_model(
-        engine,
+        pt_engine,
         messages=[{
             'role': 'user',
             'content': [
@@ -516,10 +516,10 @@ def test_megrez_omni():
 
 
 def test_molmo():
-    # engine = TransformersEngine('LLM-Research/Molmo-7B-O-0924')
-    engine = TransformersEngine('LLM-Research/Molmo-7B-D-0924')
-    _infer_model(engine)
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
+    # pt_engine = PtEngine('LLM-Research/Molmo-7B-O-0924')
+    pt_engine = PtEngine('LLM-Research/Molmo-7B-D-0924')
+    _infer_model(pt_engine)
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
     assert response == (
         ' This is a close-up photograph of a young kitten. '
         'The kitten has striking blue eyes and a mix of white and black fur, '
@@ -530,8 +530,8 @@ def test_molmo():
 
 
 def test_molmoe():
-    engine = TransformersEngine('LLM-Research/MolmoE-1B-0924')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
+    pt_engine = PtEngine('LLM-Research/MolmoE-1B-0924')
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>这是什么'}])
     assert response == (" This is a close-up photograph of a kitten's face. The kitten has striking blue eyes and "
                         "a mix of white, black, and brown fur. It's looking directly at the camera with an adorable "
                         "expression, its ears perked up and whiskers visible. The image captures the kitten's cute "
@@ -540,8 +540,8 @@ def test_molmoe():
 
 
 def test_doc_owl2():
-    engine = TransformersEngine('iic/DocOwl2', torch_dtype=torch.float16)
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': '你是谁'}], images=[])
+    pt_engine = PtEngine('iic/DocOwl2', torch_dtype=torch.float16)
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': '你是谁'}], images=[])
     images = [
         'https://modelscope.cn/models/iic/DocOwl2/resolve/master/examples/docowl2_page0.png',
         'https://modelscope.cn/models/iic/DocOwl2/resolve/master/examples/docowl2_page1.png',
@@ -551,7 +551,7 @@ def test_doc_owl2():
         'https://modelscope.cn/models/iic/DocOwl2/resolve/master/examples/docowl2_page5.png',
     ]
     response = _infer_model(
-        engine,
+        pt_engine,
         messages=[{
             'role': 'user',
             'content': '<image>' * len(images) + 'what is this paper about? provide detailed information.'
@@ -566,13 +566,13 @@ def test_doc_owl2():
 
 
 def test_valley():
-    engine = TransformersEngine('bytedance-research/Valley-Eagle-7B')
-    _infer_model(engine)
+    pt_engine = PtEngine('bytedance-research/Valley-Eagle-7B')
+    _infer_model(pt_engine)
 
 
 def test_ui_tars():
     os.environ['MAX_PIXELS'] = str(1280 * 28 * 28)
-    engine = TransformersEngine('bytedance-research/UI-TARS-2B-SFT')
+    pt_engine = PtEngine('bytedance-research/UI-TARS-2B-SFT')
     prompt = ('You are a GUI agent. You are given a task and your action history, with screenshots. '
               'You need to perform the next action to complete the task.' + r"""
 
@@ -614,22 +614,22 @@ call_user() # Submit the task and call the user when the task is unsolvable, or 
         },
     ]
     images = ['https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/agent.png']
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
 def test_phi4_vision():
-    engine = TransformersEngine('LLM-Research/Phi-4-multimodal-instruct')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'describe the image.'}])
+    pt_engine = PtEngine('LLM-Research/Phi-4-multimodal-instruct')
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'describe the image.'}])
     assert response == (
         "The image features a close-up of a kitten's face. The kitten has large, "
         'round eyes with a bright gaze, and its fur is predominantly white with black stripes. '
         "The kitten's ears are pointed and alert, and its whiskers are visible. The background is blurred, "
         "drawing focus to the kitten's face.")
     response = _infer_model(
-        engine,
+        pt_engine,
         messages=[{
             'role': 'user',
             'content': 'describe the audio.'
@@ -640,17 +640,17 @@ def test_phi4_vision():
 
 
 def test_gemma3_vision():
-    engine = TransformersEngine('LLM-Research/gemma-3-4b-it')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': '<image>Describe this image in detail.'}])
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=[{'role': 'user', 'content': '<image>Describe this image in detail.'}])
+    pt_engine = PtEngine('LLM-Research/gemma-3-4b-it')
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>Describe this image in detail.'}])
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=[{'role': 'user', 'content': '<image>Describe this image in detail.'}])
     assert response[:80] == response2[:80] == (
         "Here's a detailed description of the image:\n\n**Overall Impression:**\n\nThe image ")
 
 
 def test_mistral_2503():
-    engine = TransformersEngine('mistralai/Mistral-Small-3.1-24B-Instruct-2503')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'What is shown in this image?'}])
+    pt_engine = PtEngine('mistralai/Mistral-Small-3.1-24B-Instruct-2503')
+    response = _infer_model(pt_engine, messages=[{'role': 'user', 'content': 'What is shown in this image?'}])
     assert response == (
         'The image shows a close-up of a Siamese kitten. The kitten has distinctive blue almond-shaped eyes, '
         'a pink nose, and a light-colored coat with darker points on the ears, paws, tail, and face, '
@@ -659,37 +659,37 @@ def test_mistral_2503():
 
 
 def test_llama4():
-    engine = TransformersEngine('LLM-Research/Llama-4-Scout-17B-16E-Instruct')
+    pt_engine = PtEngine('LLM-Research/Llama-4-Scout-17B-16E-Instruct')
     messages = [{'role': 'user', 'content': '<image><image>What is the difference between the two images?'}]
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     assert response[:128] == ('The two images are distinct in their subject matter and style. The first image features '
                               'a realistic depiction of a kitten, while') and len(response) == 654
 
 
 def test_kimi_vl():
-    engine = TransformersEngine('moonshotai/Kimi-VL-A3B-Instruct')
+    pt_engine = PtEngine('moonshotai/Kimi-VL-A3B-Instruct')
     messages = [{'role': 'user', 'content': '<image><image>What is the difference between the two images?'}]
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     assert response == ('The first image is a close-up of a kitten with a blurred background, '
                         'while the second image is a cartoon of four sheep standing in a field.')
 
 
 def test_kimi_vl_thinking():
-    engine = TransformersEngine('moonshotai/Kimi-VL-A3B-Thinking-2506')
+    pt_engine = PtEngine('moonshotai/Kimi-VL-A3B-Thinking-2506')
     messages = [{'role': 'user', 'content': '<image><image>What is the difference between the two images?'}]
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     assert response[:200] == ("◁think▷So, let's analyze the two images. The first image is a close - "
                               'up of a real kitten with detailed fur, whiskers, and a realistic style. '
                               'The second image is an illustration of four sheep in a car')
@@ -703,10 +703,10 @@ def test_glm4_1v():
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
     for model in models:
-        engine = TransformersEngine(model)
-        response = _infer_model(engine, messages=messages, images=images)
-        engine.template.template_backend = 'jinja'
-        response2 = _infer_model(engine, messages=messages, images=images)
+        pt_engine = PtEngine(model)
+        response = _infer_model(pt_engine, messages=messages, images=images)
+        pt_engine.default_template.template_backend = 'jinja'
+        response2 = _infer_model(pt_engine, messages=messages, images=images)
         assert response == response2
 
 
@@ -716,15 +716,15 @@ def test_glyph():
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    engine = TransformersEngine('ZhipuAI/Glyph')
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    pt_engine = PtEngine('ZhipuAI/Glyph')
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
 def test_gemma3n():
-    engine = TransformersEngine('google/gemma-3n-E2B-it')
+    pt_engine = PtEngine('google/gemma-3n-E2B-it')
     messages = [{
         'role': 'system',
         'content': 'You are a helpful assistant.'
@@ -735,34 +735,34 @@ def test_gemma3n():
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
     ]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     assert response[:200] == (
         'The image is a close-up portrait of an adorable kitten, filling the frame with its captivating presence.'
         ' The kitten is the clear focal point, positioned slightly off-center, looking directly at the vi')
 
 
 def test_keye_vl():
-    engine = TransformersEngine('Kwai-Keye/Keye-VL-8B-Preview')
+    pt_engine = PtEngine('Kwai-Keye/Keye-VL-8B-Preview')
     messages = [{'role': 'user', 'content': '<image><image>What is the difference between the two images?'}]
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    engine.template.template_backend = 'swift'
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'swift'
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
 def test_keye_vl_1_5():
-    engine = TransformersEngine('Kwai-Keye/Keye-VL-1_5-8B')
+    pt_engine = PtEngine('Kwai-Keye/Keye-VL-1_5-8B')
     messages = [{'role': 'user', 'content': 'Describe this image.'}]
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
     ]
-    engine.template.template_backend = 'swift'
-    response = _infer_model(engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'swift'
+    response = _infer_model(pt_engine, messages=messages, images=images)
     assert response[:200] == ('<analysis>This question is straightforward and asks for a description of the image. '
                               'Therefore, /no_think mode is more appropriate.</analysis>'
                               'This image features a close-up of an adorable kitten with s')
@@ -770,12 +770,12 @@ def test_keye_vl_1_5():
 
 def test_dots_ocr():
     # https://github.com/modelscope/ms-swift/issues/2122
-    engine = TransformersEngine('rednote-hilab/dots.ocr')
+    pt_engine = PtEngine('rednote-hilab/dots.ocr')
     messages = [{'role': 'user', 'content': '<image>Extract the text content from this image.'}]
     images = ['https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
@@ -785,10 +785,10 @@ def test_glm4_5v():
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    engine = TransformersEngine('ZhipuAI/GLM-4.5V')
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    pt_engine = PtEngine('ZhipuAI/GLM-4.5V')
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
@@ -802,13 +802,13 @@ def run_hf(model, processor, messages):
 
 
 def test_interns1():
-    engine = TransformersEngine('Shanghai_AI_Laboratory/Intern-S1-mini')
+    pt_engine = PtEngine('Shanghai_AI_Laboratory/Intern-S1-mini')
     images = ['http://images.cocodataset.org/val2017/000000039769.jpg']
     query = 'Please describe the image explicitly.'
     messages = [{'role': 'user', 'content': query}]
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     messages = [{
         'role': 'user',
         'content': [
@@ -822,7 +822,7 @@ def test_interns1():
             },
         ],
     }]
-    response2 = run_hf(engine.model, engine.processor, messages)
+    response2 = run_hf(pt_engine.model, pt_engine.processor, messages)
     assert response == '<think>' + response2
 
 
@@ -833,21 +833,21 @@ def test_internvl3_5():
         'OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview'
     ]
     for model in models:
-        engine = TransformersEngine(model)
+        pt_engine = PtEngine(model)
         images = ['http://images.cocodataset.org/val2017/000000039769.jpg']
         messages = [{'role': 'user', 'content': 'Please describe the image explicitly.'}]
-        response = _infer_model(engine, messages=messages, images=images)
-        engine.template.template_backend = 'jinja'
-        response2 = _infer_model(engine, messages=messages, images=images)
+        response = _infer_model(pt_engine, messages=messages, images=images)
+        pt_engine.default_template.template_backend = 'jinja'
+        response2 = _infer_model(pt_engine, messages=messages, images=images)
         assert response == response2
 
 
 def test_internvl3_hf():
-    engine = TransformersEngine('OpenGVLab/InternVL3-1B-hf')
+    pt_engine = PtEngine('OpenGVLab/InternVL3-1B-hf')
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
     query = 'Please describe the image explicitly.'
     messages = [{'role': 'user', 'content': query}]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     messages = [{
         'role': 'user',
         'content': [
@@ -861,16 +861,16 @@ def test_internvl3_hf():
             },
         ],
     }]
-    response2 = run_hf(engine.model, engine.processor, messages)
+    response2 = run_hf(pt_engine.model, pt_engine.processor, messages)
     assert response == response2
 
 
 def test_internvl3_5_hf():
-    engine = TransformersEngine('OpenGVLab/InternVL3_5-1B-HF')
+    pt_engine = PtEngine('OpenGVLab/InternVL3_5-1B-HF')
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
     query = 'Please describe the image explicitly.'
     messages = [{'role': 'user', 'content': query}]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     messages = [{
         'role': 'user',
         'content': [
@@ -884,16 +884,16 @@ def test_internvl3_5_hf():
             },
         ],
     }]
-    response2 = run_hf(engine.model, engine.processor, messages)
+    response2 = run_hf(pt_engine.model, pt_engine.processor, messages)
     assert response == response2
 
 
 def test_internvl_gpt_hf():
-    engine = TransformersEngine('OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview-HF')
+    pt_engine = PtEngine('OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview-HF')
     query = 'Please describe the image explicitly.'
     messages = [{'role': 'user', 'content': query}]
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     messages = [{
         'role': 'user',
         'content': [
@@ -907,28 +907,17 @@ def test_internvl_gpt_hf():
             },
         ],
     }]
-    response2 = run_hf(engine.model, engine.processor, messages)
+    response2 = run_hf(pt_engine.model, pt_engine.processor, messages)
     assert response == response2
 
 
 def test_minicpmv4_5():
-    engine = TransformersEngine('OpenBMB/MiniCPM-V-4_5')
+    pt_engine = PtEngine('OpenBMB/MiniCPM-V-4_5')
     images = ['http://images.cocodataset.org/val2017/000000039769.jpg']
     messages = [{'role': 'user', 'content': 'Please describe the image explicitly.'}]
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
-    assert response == response2
-
-
-def test_minicpmv4_6():
-    engine = TransformersEngine('OpenBMB/MiniCPM-V-4.6')
-    images = ['http://images.cocodataset.org/val2017/000000039769.jpg']
-    messages = [{'role': 'user', 'content': 'Please describe the image explicitly.'}]
-    engine.template.enable_thinking = False
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
@@ -948,13 +937,13 @@ def _run_qwen3_vl_hf(messages, model, processor):
 
 
 def test_qwen3_vl():
-    engine = TransformersEngine('Qwen/Qwen3-VL-4B-Instruct')
+    pt_engine = PtEngine('Qwen/Qwen3-VL-4B-Instruct')
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
     query = 'describe this image.'
     messages = [{'role': 'user', 'content': query}]
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     messages = [{
         'role': 'user',
         'content': [
@@ -968,17 +957,17 @@ def test_qwen3_vl():
             },
         ],
     }]
-    engine.model.generation_config.repetition_penalty = 1
-    response3 = _run_qwen3_vl_hf(messages, engine.model, engine.processor)
+    pt_engine.model.generation_config.repetition_penalty = 1
+    response3 = _run_qwen3_vl_hf(messages, pt_engine.model, pt_engine.processor)
     assert response == response2 == response3
 
 
 def test_sailvl2():
-    engine = TransformersEngine('BytedanceDouyinContent/SAIL-VL2-2B')
+    pt_engine = PtEngine('BytedanceDouyinContent/SAIL-VL2-2B')
     query = 'describe the image'
     messages = [{'role': 'user', 'content': query}]
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     ans = ("The image showcases a stunning close-up of a kitten's face, "
            'capturing its delicate features in exquisite detail. '
            "The kitten's fur is a beautiful blend of white and gray, "
@@ -989,11 +978,11 @@ def test_sailvl2():
 
 
 def test_deepseek_ocr():
-    engine = TransformersEngine('deepseek-ai/DeepSeek-OCR', attn_impl='flash_attention_2')
+    pt_engine = PtEngine('deepseek-ai/DeepSeek-OCR', attn_impl='flash_attention_2')
     query = 'Free OCR.'
     messages = [{'role': 'user', 'content': query}]
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(engine, messages=messages, images=images, max_tokens=256)
+    response = _infer_model(pt_engine, messages=messages, images=images, max_tokens=256)
     assert response == ('# 简介\n\nSWIFT支持250+ LLM和35+ MLLM（多模态大模型）的训练、推理、评测和部署。开发者可以直接'
                         '将我们的框架应用到自己的Research和生产环境中，实现模型训练评测到应用的完整链路。我们除支持了PEFT提'
                         '供的轻量训练方案外，也提供了一个完整的**Adapters库**以支持最新的训练技术，如NEFTune、LoRA+、'
@@ -1004,74 +993,24 @@ def test_deepseek_ocr():
                         '创空间 中体验SWIFT web-ui功能了。')
 
 
-def test_deepseek_ocr_2():
-    engine = TransformersEngine('deepseek-ai/DeepSeek-OCR-2', attn_impl='flash_attention_2')
-    query = 'Free OCR.'
-    messages = [{'role': 'user', 'content': query}]
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(engine, messages=messages, images=images, max_tokens=256)
-    assert response == ('# 简介\n\nSWIFT支持250+ LLM和35+ MLLM（多模态大模型）的训练、推理、评测和部署。开发者可以直接'
-                        '将我们的框架应用到自己的Research和生产环境中，实现模型训练评测到应用的完整链路。我们除支持PEFT提'
-                        '供的轻量训练方案外，也提供了一个完整的Adapters库以支持最新的训练技术，如NEFTune、LoRA+、'
-                        'LLaMA-PRO等，这个适配器库可以脱离训练脚本直接使用在自己的自定流程中。\n\n为方便不熟悉深度学习的'
-                        '用户使用，我们提供了一个Gradio的web-ui用于控制训练和推理，并提供了配套的深度学习课程和最佳实践供'
-                        '新手入门。\n\n此外，我们也在拓展其他模态的能力，目前我们支持了AnimateDiff的全参数训练和LoRA训练'
-                        '。\n\nSWIFT具有丰富的文档体系，如有使用问题请查看这里。\n\n可以在Huggingface space 和 '
-                        'ModelScope创空间 中体验SWIFT web-ui功能了。')
-
-
-def test_ovis_ocr2():
-    engine = TransformersEngine('ATH-MaaS/OvisOCR2')
-    assert engine.model_info.model_type == 'ovis_ocr2'
-    assert engine.template.template_meta.template_type == 'ovis_ocr2'
-    assert engine.template.template_meta.is_thinking is False
-    ocr_prompt = (
-        '\nExtract all readable content from the image in natural human reading order and output the '
-        'result as a single Markdown document. For charts or images, represent them using an HTML image '
-        'tag: <'  # noqa: E501
-        'img src="images/bbox_{left}_{top}_{right}_{bottom}.jpg" />, where left, top, right, '
-        'bottom are bounding box coordinates scaled to [0, 1000). Format formulas as LaTeX. Format tables '
-        'as HTML: <table>...</table>. Transcribe all other text as standard Markdown. Preserve the '
-        'original text without translation or paraphrasing.')
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(
-        engine, messages=[{
-            'role': 'user',
-            'content': f'<image>{ocr_prompt}'
-        }], images=images, max_tokens=4096)
-    assert response == ('<think>\n\n</think>\n\n'
-                        '<img src="images/bbox_47_38_89_90.jpg" />\n\n'
-                        '## 简介\n\n'
-                        'SWIFT支持250+ LLM和35+ MLLM（多模态大模型）的训练、推理、评测和部署。'
-                        '开发者可以直接将我们的框架应用到自己的Research和生产环境中，实现模型训练评测到应用的完整链路。'
-                        '我们除支持了PEFT提供的轻量训练方案外，也提供了一个完整的Adapters库以支持最新的训练技术，'
-                        '如NEFTune、LoRA+、LLaMA-PRO等，这个适配器库可以脱离训练脚本直接使用在自己的自定流程中。\n\n'
-                        '为方便不熟悉深度学习的用户使用，我们提供了一个Gradio的web-ui用于控制训练和推理，'
-                        '并提供了配套的深度学习课程和最佳实践供新手入门。\n\n'
-                        '此外，我们也在拓展其他模态的能力，目前我们支持了AnimateDiff的全参数训练和LoRA训练。\n\n'
-                        'SWIFT具有丰富的文档体系，如有使用问题请请查看这里.\n\n'
-                        '可以在Huggingface space 和 ModelScope创空间 中体验SWIFT web-ui功能了。')
-
-
 def test_llava_onevision1_5():
-    engine = TransformersEngine('lmms-lab/LLaVA-OneVision-1.5-4B-Instruct')
+    pt_engine = PtEngine('lmms-lab/LLaVA-OneVision-1.5-4B-Instruct')
     query = 'Describe this image.'
     messages = [{'role': 'user', 'content': query}]
     images = ['https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg']
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
 def test_paddle_ocr():
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
-    engine = TransformersEngine('PaddlePaddle/PaddleOCR-VL')
+    pt_engine = PtEngine('PaddlePaddle/PaddleOCR-VL')
     query = 'OCR:'
     messages = [{'role': 'user', 'content': query}]
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(engine, messages=messages, images=images, max_tokens=1024)
+    response = _infer_model(pt_engine, messages=messages, images=images, max_tokens=1024)
     assert response == ('SWIFT支持250+ LLM和35+ MLLM（多模态大模型）的训练、推理、评测和部署。开发者可以直接将我们的框架'
                         '应用到自己的Research和生产环境中，实现模型训练评测到应用的完整链路。我们除支持了PEFT提供的轻量训练'
                         '方案外，也提供了一个完整的Adapters库以支持最新的训练技术，如NEFTune、LoRA+、LLaMA-PRO等，这个适'
@@ -1083,15 +1022,15 @@ def test_paddle_ocr():
 
 
 def test_ernie_vl():
-    engine = TransformersEngine('PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT')
+    pt_engine = PtEngine('PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT')
     messages = [{'role': 'user', 'content': '<image><image>What is the difference between the two images?'}]
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, images=images)
     assert response == response2
 
 
@@ -1119,14 +1058,14 @@ def _infer_ernie_vl_thinking_hf(model, processor, messages):
 
 
 def test_ernie_vl_thinking():
-    engine = TransformersEngine('PaddlePaddle/ERNIE-4.5-VL-28B-A3B-Thinking')
+    pt_engine = PtEngine('PaddlePaddle/ERNIE-4.5-VL-28B-A3B-Thinking')
     query = 'What is the difference between the two images?'
     messages = [{'role': 'user', 'content': query}]
     images = [
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png',
         'http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png'
     ]
-    response = _infer_model(engine, messages=messages, images=images)
+    response = _infer_model(pt_engine, messages=messages, images=images)
     messages = [{
         'role':
         'user',
@@ -1149,178 +1088,12 @@ def test_ernie_vl_thinking():
             },
         ]
     }]
-    response2 = _infer_ernie_vl_thinking_hf(engine.model, engine.template.processor, messages)
+    response2 = _infer_ernie_vl_thinking_hf(pt_engine.model, pt_engine.default_template.processor, messages)
     assert response == '\n<think>\n' + response2
 
 
-def test_mistral_2506():
-    engine = TransformersEngine('mistralai/Mistral-Small-3.2-24B-Instruct-2506')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'describe the image.'}])
-    assert response[:200] == (
-        'The image features a close-up of a kitten with striking blue eyes. The kitten has a soft, '
-        'fluffy coat with a mix of white, gray, and brown fur. Its fur pattern includes distinct '
-        'stripes, particularly ')
-
-
-def test_sensenova_si():
-    engine = TransformersEngine('SenseNova/SenseNova-SI-1.1-InternVL3-8B')
-    response = _infer_model(engine)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, system='你是书生·万象，英文名是InternVL，是由上海人工智能实验室、清华大学及多家合作单位联合开发的多模态大语言模型。')
-    assert response == response2
-
-
-def test_mistral_2512():
-    engine = TransformersEngine('mistralai/Ministral-3-8B-Instruct-2512-BF16')
-    response = _infer_model(engine, messages=[{'role': 'user', 'content': 'describe the image.'}])
-    assert response[:256] == (
-        'This image depicts a charming kitten with a few notable features:\n\n'
-        '1. **Appearance**: The kitten has a soft, fluffy coat with a mix of white '
-        'and grayish-brown stripes, typical of a tabby pattern. The fur appears plush and slightly ruffled, '
-        'especially aroun')
-
-
-def test_mistral_2512_thinking():
-    engine = TransformersEngine('mistralai/Ministral-3-8B-Reasoning-2512')
-    response1 = _infer_model(engine, messages=[{'role': 'user', 'content': 'describe the image.'}])
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=[{'role': 'user', 'content': 'describe the image.'}])
-    assert response1[:256] == response2[:256]
-
-
-def test_hunyuan_ocr():
-    engine = TransformersEngine('Tencent-Hunyuan/HunyuanOCR')
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    messages = [{
-        'role':
-        'user',
-        'content': ('Extract all information from the main body of the document image '
-                    'and represent it in markdown format, ignoring headers and footers. '
-                    'Tables should be expressed in HTML format, formulas in the document '
-                    'should be represented using LaTeX format, and the parsing should be '
-                    'organized according to the reading order.')
-    }]
-    response1 = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
-    assert response1 == response2
-
-
-def test_medgemma3_vision():
-    engine = TransformersEngine('google/medgemma-4b-it')
-    images = ['https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg']
-    system = 'You are an expert radiologist.'
-    messages = [{
-        'role': 'user',
-        'content': 'Describe this image',
-    }]
-    response = _infer_model(engine, messages=messages, images=images, system=system)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images, system=system)
-    assert response == response2
-
-
-def test_step3_vl():
-    engine = TransformersEngine('stepfun-ai/Step3-VL-10B')
-    images = ['https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg']
-    messages = [{
-        'role': 'user',
-        'content': 'Describe this image',
-    }]
-    response = _infer_model(engine, messages=messages, images=images)
-    engine.template.template_backend = 'jinja'
-    response2 = _infer_model(engine, messages=messages, images=images)
-    assert response == response2
-
-
-def test_paddle_ocr_1_5():
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0'
-    engine = TransformersEngine('PaddlePaddle/PaddleOCR-VL-1.5')
-    query = 'OCR:'
-    messages = [{'role': 'user', 'content': query}]
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(engine, messages=messages, images=images, max_tokens=512)
-    assert response == ('简介\nSWIFT支持250+ LLM和35+ MLLM（多模态大模型）的训练、推理、评测和部署。开发者可以直接将我们的框架'
-                        '应用到自己的Research和生产环境中，实现模型训练评测到应用的完整链路。我们除支持了PEFT提供的轻量训练方案外，'
-                        '也提供了一个完整的Adapters库以支持最新的训练技术，如NEFTune、LoRA+、LLaMA-PRO等，这个适配器库可以脱离训'
-                        '练脚本直接使用在自己的自定流程中。\n为方便不熟悉深度学习的用户使用，我们提供了一个Gradio的web-ui用于控制训'
-                        '练和推理，并提供了配套的深度学习课程和最佳实践供新手入门。\n此外，我们也在拓展其他模态的能力，目前我们支持了'
-                        'AnimateDiff的全参数训练和LoRA训练。\nSWIFT具有丰富的文档体系，如有使用问题请请查看这里.\n'
-                        '可以在\\(\\underline{\\text{Huggingface space}}\\)'
-                        '和\\(\\underline{\\text{ModelScope创空间}}\\)'
-                        '中体验SWIFT web-ui功能了。')
-
-
-def test_glm_ocr():
-    engine = TransformersEngine('ZhipuAI/GLM-OCR')
-    query = 'Text Recognition:'
-    messages = [{'role': 'user', 'content': query}]
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(engine, messages=messages, images=images, max_tokens=512)
-    assert response == ('简介\n\nSWIFT支持250+ LLM和35+ MLLM（多模态大模型）的训练、推理、\n'
-                        '评测和部署。开发者可以直接将我们的框架应用到自己的Research和\n'
-                        '生产环境中，实现模型训练评测到应用的完整链路。我们除支持了\n'
-                        'PEFT提供的轻量训练方案外，也提供了一个完整的Adapters库以支持\n'
-                        '最新的训练技术，如NEFTune、LoRA+、LLaMA-PRO等，这个适配器\n'
-                        '库可以脱离训练脚本直接使用在自己的自定流程中。\n\n'
-                        '为方便不熟悉深度学习的用户使用，我们提供了一个Gradio的web-ui用\n'
-                        '于控制训练和推理，并提供了配套的深度学习课程和最佳实践供新手入\n'
-                        '门。\n\n'
-                        '此外，我们也在拓展其他模态的能力，目前我们支持了AnimateDiff的\n'
-                        '全参数训练和LoRA训练。\n\n'
-                        'SWIFT具有丰富的文档体系，如有使用问题请请查看这里.\n\n'
-                        '可以在Huggingface space 和 ModelScope创空间 中体验SWIFT web-\n'
-                        'ui功能了。')
-
-
-def test_gemma4():
-    engine = TransformersEngine('google/gemma-4-E2B-it')
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png']
-    messages = [{
-        'role': 'user',
-        'content': 'What is shown in this image?',
-    }]
-    response = _infer_model(engine, messages=messages, images=images)
-    print(response)
-
-
-def test_mineru2_5_pro():
-    engine = TransformersEngine('OpenDataLab/MinerU2.5-Pro-2604-1.2B')
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    messages = [{
-        'role': 'user',
-        'content': '<image>\nText Recognition:',
-    }]
-    response = _infer_model(engine, messages=messages, images=images)
-    print(response)
-
-
-def test_unlimited_ocr():
-    engine = TransformersEngine('PaddlePaddle/Unlimited-OCR')
-    query = 'Free OCR.'
-    messages = [{'role': 'user', 'content': query}]
-    images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/ocr.png']
-    response = _infer_model(engine, messages=messages, images=images, max_tokens=256)
-    print(response)
-
-
-def test_qwen3_8():
-    engine = TransformersEngine('Qwen/Qwen3.8-27B')
-    template = engine.template
-    assert engine.model_info.model_type == 'qwen3_5'
-    assert template.template_meta.template_type == 'qwen3_8'
-    # Qwen3.8 keeps historical thinking by default, unlike Qwen3.5/Qwen3.6.
-    assert template.template_meta.preserve_thinking is True
-    messages = [{'role': 'user', 'content': '<image>这是什么'}]
-    swift_response = _infer_model(engine, messages=messages)
-    engine.template.template_backend = 'jinja'
-    jinja_response = _infer_model(engine, messages=messages)
-    assert swift_response == jinja_response
-
-
 if __name__ == '__main__':
-    from swift.infer_engine import RequestConfig, TransformersEngine
+    from swift.llm import PtEngine, RequestConfig
     from swift.utils import get_logger, seed_everything
 
     logger = get_logger()
@@ -1385,7 +1158,6 @@ if __name__ == '__main__':
     # test_interns1()
     # test_internvl3_5()
     # test_minicpmv4_5()
-    # test_minicpmv4_6()
     # test_qwen3_vl()
     # test_keye_vl_1_5()
     # test_internvl3_hf()
@@ -1396,19 +1168,4 @@ if __name__ == '__main__':
     # test_llava_onevision1_5()
     # test_paddle_ocr()
     # test_ernie_vl()
-    # test_ernie_vl_thinking()
-    # test_mistral_2506()
-    # test_sensenova_si()
-    # test_mistral_2512()
-    # test_mistral_2512_thinking()
-    # test_hunyuan_ocr()
-    # test_medgemma3_vision()
-    # test_deepseek_ocr_2()
-    # test_step3_vl()
-    # test_paddle_ocr_1_5()
-    # test_glm_ocr()
-    # test_gemma4()
-    # test_mineru2_5_pro()
-    # test_unlimited_ocr()
-    # test_ovis_ocr2()
-    test_qwen3_8()
+    test_ernie_vl_thinking()

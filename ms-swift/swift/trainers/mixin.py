@@ -1,93 +1,81 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 # Part of the implementation is borrowed from huggingface/transformers.
 import collections
-import datasets
 import inspect
-import json
 import logging
-import numpy as np
 import os
 import random
 import re
-import safetensors
 import shutil
 import time
+import warnings
+from contextlib import contextmanager
+from copy import copy
+from functools import partial, wraps
+from types import MethodType
+from typing import Callable, Dict, List, Optional, Tuple, Union
+
+import datasets
+import numpy as np
+import safetensors
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.utils.checkpoint
 import transformers
-import warnings
-from contextlib import contextmanager
-from copy import copy
 from datasets import Dataset as HfDataset
-from functools import partial, wraps
 from modelscope import check_local_model_is_latest
 from packaging import version
 from peft import PeftModel
+from torch.nn import Module
 from torch.utils.data import DataLoader
 from transformers import PreTrainedModel
+from transformers.data.data_collator import DataCollator
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import unwrap_model
-from transformers.trainer import OPTIMIZER_NAME, PREFIX_CHECKPOINT_DIR, SCHEDULER_NAME, TRAINER_STATE_NAME, ParallelMode
-from transformers.trainer import Trainer as HfTrainer
-from transformers.trainer import reissue_pt_warnings
+from transformers.trainer import (OPTIMIZER_NAME, PREFIX_CHECKPOINT_DIR, SCHEDULER_NAME, TRAINER_STATE_NAME,
+                                  ParallelMode, Trainer, TrainerCallback, reissue_pt_warnings)
 from transformers.trainer_utils import IntervalStrategy
 
-try:
-    from transformers.trainer_utils import sort_checkpoints
-except ImportError:
-    sort_checkpoints = None
-from types import MethodType
-from typing import Callable, Dict, List, Optional
-
-from swift.callbacks import callbacks_map
-from swift.dataloader import BatchSamplerShard, DataLoaderDispatcher, DataLoaderShard
 from swift.hub import get_hub
-from swift.loss import loss_map
-from swift.metrics import MeanMetric, compute_acc, eval_metrics_map
-from swift.model import get_llm_model, get_lm_head_model, save_checkpoint
-from swift.model.patcher import gather_sequence_parallel_outputs, revert_padding_free, transformers_seq_cls_forward
-from swift.optimizers import OptimizerCallback, optimizers_map
-from swift.sequence_parallel import SequenceParallelDispatcher, SequenceParallelSampler, sequence_parallel
-from swift.template import Template, update_generation_config_eos_token
-from swift.tuner_plugin import tuners_map
+from swift.llm import BatchSamplerShard, DataLoaderDispatcher, DataLoaderShard, Template, get_llm_model
+from swift.llm.utils import update_generation_config_eos_token
+from swift.plugin import MeanMetric, compute_acc, extra_tuners, get_loss_func, get_metric
 from swift.tuners import SwiftModel
-from swift.utils import (HfConfigFactory, copy_files_by_pattern, deep_getattr, get_current_device, get_logger,
-                         get_packed_seq_params, is_dist, is_mp, is_mp_ddp, ms_logger_context, seed_worker,
-                         update_last_checkpoint_symlink)
+from swift.utils import get_current_device, get_logger, is_dist, is_mp, is_mp_ddp, ms_logger_context, seed_worker
+from ..llm.model.patcher import get_lm_head_model, revert_padding_free, transformers_seq_cls_forward
 from .arguments import TrainingArguments
-from .utils import (accepts_parameter, can_return_loss, dynamic_gradient_checkpointing, find_labels, get_function,
-                    get_resume_dir, is_instance_of_ms_model, patch_modelscope_hub_timeout, replace_index_file)
+from .utils import can_return_loss, find_labels, get_function, is_instance_of_ms_model
+
+try:
+    from trl import AutoModelForCausalLMWithValueHead
+except (ImportError, RuntimeError):
+    AutoModelForCausalLMWithValueHead = None
 
 logger = get_logger()
-
-transformers_5 = version.parse(transformers.__version__) >= version.parse('5.0.0')
 
 
 class SwiftMixin:
     FLASH_CKPT_WAIT_TIMEOUT = 1800
 
     def __init__(self,
-                 model: PreTrainedModel,
-                 args: TrainingArguments,
-                 template: Template,
-                 train_dataset: HfDataset,
-                 eval_dataset: Optional[HfDataset] = None,
+                 model: Union[PreTrainedModel, Module] = None,
+                 args: TrainingArguments = None,
+                 data_collator: Optional[DataCollator] = None,
+                 train_dataset: Optional[HfDataset] = None,
+                 eval_dataset: Optional[Union[HfDataset, Dict[str, HfDataset]]] = None,
+                 template: Optional[Template] = None,
+                 model_init: Optional[Callable[[], PreTrainedModel]] = None,
+                 callbacks: Optional[List[TrainerCallback]] = None,
+                 optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
                  **kwargs) -> None:
         if not hasattr(train_dataset, '__len__') and args.dataloader_num_workers > 1:
             args.dataloader_num_workers = 1
             logger.warning('Using IterableDataset, setting args.dataloader_num_workers to 1.')
         self.compute_loss_func = None  # Compatible with the older version of transformers
-        self.template = template
 
-        self.is_encoder_decoder = self.template.is_encoder_decoder
-        self.padding_free = self.template.padding_free
-        self.task_type = self.template.task_type
-        self.problem_type = getattr(model.config, 'problem_type', None)
-        self.optimizer_callback = optimizers_map[args.optimizer or 'default'](args, self)
         if args.check_model and hasattr(model, 'model_dir'):
-            with ms_logger_context(logging.CRITICAL), patch_modelscope_hub_timeout():
+            with ms_logger_context(logging.CRITICAL), self._patch_timeout():
                 config_info = self._collect_config_info()
                 config_info.update({
                     'invoked_by': 'local_trainer',
@@ -110,18 +98,15 @@ class SwiftMixin:
             'train': collections.defaultdict(_get_mean_metric),
             'eval': collections.defaultdict(_get_mean_metric)
         }
+        self.template = template
         self.hub = get_hub()
 
         self.model_meta = model.model_meta
-        self.model_info = model.model_info
 
-        data_collator = self._get_data_collator(args, template)
-        kwargs.update(self.create_loss_and_eval_metric(args))
-        trainer_parameters = inspect.signature(HfTrainer.__init__).parameters
+        kwargs.update(self.create_loss_and_metric(args))
+        trainer_parameters = inspect.signature(Trainer.__init__).parameters
         tokenizer_key = 'processing_class' if 'processing_class' in trainer_parameters else 'tokenizer'
         kwargs[tokenizer_key] = template.tokenizer
-        # Pass callbacks in __init__ to correctly invoke on_init_end
-        callbacks = self._get_callbacks(args)
         with self.hub.patch_hub():
             super().__init__(
                 model=model,
@@ -129,11 +114,11 @@ class SwiftMixin:
                 data_collator=data_collator,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
+                model_init=model_init,
                 callbacks=callbacks,
+                optimizers=optimizers,
                 **kwargs)
-        # fix https://github.com/huggingface/transformers/pull/43919
-        if transformers_5:
-            self.accelerator.gradient_state.plugin_kwargs['num_steps'] = 1
+
         if get_function(model.__class__.forward) is not get_function(model.forward):
             self.label_names = find_labels(model)
             self.can_return_loss = can_return_loss(model)
@@ -149,15 +134,23 @@ class SwiftMixin:
             # so reading train_state is skipped here.
             self.args.resume_from_checkpoint = None
 
-    def _get_data_collator(self, args, template):
-        padding_to = template.max_length if args.tuner_type == 'longlora' else None
-        return partial(template.data_collator, padding_to=padding_to)
+    @contextmanager
+    def _patch_timeout(self):
+        from modelscope.hub.api import HubApi
+        __init__ = HubApi.__init__
 
-    def _get_callbacks(self, args):
-        callbacks = []
-        for callback in args.callbacks:
-            callbacks.append(callbacks_map[callback](args, self))
-        return callbacks
+        def __new_init__(self, *args, **kwargs):
+            timeout = kwargs.get('timeout')
+            if timeout is not None and timeout > 5:
+                kwargs['timeout'] = 5
+            __init__(self, *args, **kwargs)
+
+        HubApi.__init__ = __new_init__
+
+        try:
+            yield
+        finally:
+            HubApi.__init__ = __init__
 
     def _collect_config_info(self) -> Dict[str, str]:
         """
@@ -169,15 +162,6 @@ class SwiftMixin:
         Returns:
             Dict[str, str]: Configuration parameters as key-value pairs.
         """
-        if self.__class__.__name__ == 'Seq2SeqTrainer':
-            if not self.template.use_chat_template:
-                return {
-                    'seq2seq_mode': 'pt',
-                }
-            else:
-                return {
-                    'seq2seq_mode': 'sft',
-                }
         return {}
 
     @property
@@ -212,14 +196,10 @@ class SwiftMixin:
         use_logits_to_keep = self.args.use_logits_to_keep
         if use_logits_to_keep is None:
             base_model = self.template.get_base_model(self.model)
-            if self.model.model_meta.is_multimodal and not transformers_5:
-                use_logits_to_keep = False
-            elif 'logits_to_keep' not in inspect.signature(base_model.forward).parameters:
-                use_logits_to_keep = False
-            else:
-                use_logits_to_keep = default_value
-            self.args.use_logits_to_keep = use_logits_to_keep
-            logger.info_once(f'use_logits_to_keep: {use_logits_to_keep}')
+            use_logits_to_keep = (not self.model.model_meta.is_multimodal
+                                  and 'logits_to_keep' in inspect.signature(base_model.forward).parameters
+                                  and default_value)
+        logger.info_once(f'use_logits_to_keep: {use_logits_to_keep}')
         return use_logits_to_keep
 
     def _save_initial_model(self, output_dir):
@@ -242,9 +222,6 @@ class SwiftMixin:
             init_lora_weights = getattr(config, 'init_lora_weights', None)
             if isinstance(init_lora_weights, str):
                 config = copy(config)
-                # Save requires_grad state to protect against peft inject_adapter side effects
-                # (peft >= 0.18.1 incorrectly freezes active adapter when loading a temporary adapter)
-                requires_grad_state = {n: p.requires_grad for n, p in model.named_parameters()}
                 os.makedirs(os.path.join(output_dir, 'converted'), exist_ok=True)
                 if 'lora-ga' in init_lora_weights:
                     try:
@@ -270,10 +247,6 @@ class SwiftMixin:
                             os.path.dirname(output_dir), 'initial_model'),
                     )
                     model.peft_config['default'] = config
-                # Restore requires_grad state after conversion to prevent peft side effects
-                for n, p in model.named_parameters():
-                    if n in requires_grad_state:
-                        p.requires_grad = requires_grad_state[n]
 
     def _load_rng_state(self, *args, **kwargs):
         if self.args.resume_only_model:
@@ -284,12 +257,6 @@ class SwiftMixin:
         if self.args.resume_only_model:
             return
         super()._load_optimizer_and_scheduler(*args, **kwargs)
-        callbacks = set(getattr(self.args, 'callbacks', []))
-        ds_config = getattr(self.args, 'deepspeed', None) or {}
-        checkpoint_config = ds_config.get('checkpoint') if isinstance(ds_config, dict) else None
-        load_universal = isinstance(checkpoint_config, dict) and checkpoint_config.get('load_universal', False)
-        if 'deepspeed_elastic' in callbacks and load_universal:
-            self._fix_optimizer_step_device(self.optimizer)
         if is_mp_ddp():
             # fix mp+ddp adamw
             for v in self.optimizer.state.values():
@@ -299,36 +266,13 @@ class SwiftMixin:
                     if len(device_set) >= 1:
                         v['step'] = v['step'].to('cpu')
 
-    @staticmethod
-    def _fix_optimizer_step_device(optimizer):
-        state = getattr(optimizer, 'state', None)
-        if not isinstance(state, dict):
-            return
-        for value in state.values():
-            if not isinstance(value, dict):
-                continue
-            step = value.get('step')
-            if not isinstance(step, torch.Tensor):
-                continue
-            target_device = None
-            for state_key, state_value in value.items():
-                if state_key == 'step':
-                    continue
-                if isinstance(state_value, torch.Tensor) and state_value.device.type != 'cpu':
-                    target_device = state_value.device
-                    break
-            if target_device is not None and step.device != target_device:
-                value['step'] = step.to(target_device)
-
     def _save_model(self, output_dir: Optional[str] = None, state_dict=None):
-        # If template defines a save_callback, delegate to it
-        if hasattr(self, 'template') and hasattr(self.template, 'save_callback'):
-            self.template.save_callback(self.model, output_dir)
-            return
         # model
         supported_classes = (SwiftModel, PreTrainedModel, PeftModel)
         supported_names = ('SentenceTransformer', )
-        safe_serialization = self.args.safe_serialization
+        if AutoModelForCausalLMWithValueHead is not None:
+            supported_classes = supported_classes + (AutoModelForCausalLMWithValueHead, )
+        save_safetensors = self.args.save_safetensors
         use_flash_ckpt = self.args.use_flash_ckpt
 
         if not isinstance(self.model, supported_classes) and self.model.__class__.__name__ not in supported_names:
@@ -337,26 +281,41 @@ class SwiftMixin:
 
             _unwrap_model = unwrap_model(self.model)
             if isinstance(_unwrap_model, supported_classes):
-                save_kwargs = {'state_dict': state_dict, 'max_shard_size': self.args.max_shard_size}
-                if isinstance(_unwrap_model, PeftModel):
-                    save_kwargs['selected_adapters'] = ['default']
                 if use_flash_ckpt:
                     _unwrap_model.save_pretrained(
                         output_dir,
+                        state_dict=state_dict,
                         safe_serialization=False,
-                        save_function=self.flash_checkpointer.ckpt_agent.save,
-                        **save_kwargs)
+                        save_function=self.flash_checkpointer.ckpt_agent.save)
                 else:
-                    _unwrap_model.save_pretrained(output_dir, safe_serialization=safe_serialization, **save_kwargs)
+                    _unwrap_model.save_pretrained(
+                        output_dir, state_dict=state_dict, safe_serialization=save_safetensors)
             else:
                 logger.info('Trainer.model is not a `PreTrainedModel`, only saving its state dict.')
                 if use_flash_ckpt:
                     self.flash_checkpointer.ckpt_agent.save(state_dict, os.path.join(output_dir, 'pytorch_model.bin'))
                 else:
-                    if safe_serialization:
+                    if save_safetensors:
                         safetensors.torch.save_file(state_dict, os.path.join(output_dir, 'model.safetensors'))
                     else:
                         torch.save(state_dict, os.path.join(output_dir, 'pytorch_model.bin'))
+        elif AutoModelForCausalLMWithValueHead and isinstance(self.model, AutoModelForCausalLMWithValueHead):
+            # save reward model
+            state_dict = self.model.state_dict()
+            decoder_state_dict, v_head_state_dict = {}, {}
+            for name, param in state_dict.items():
+                if name.startswith('v_head.'):
+                    v_head_state_dict[name] = param
+                else:
+                    decoder_state_dict[name.replace('pretrained_model.', '', 1)] = param
+            self.model.pretrained_model.save_pretrained(
+                output_dir, state_dict=decoder_state_dict or None, safe_serialization=save_safetensors)
+            if save_safetensors:
+                from safetensors.torch import save_file
+                save_file(
+                    v_head_state_dict, os.path.join(output_dir, 'value_head.safetensors'), metadata={'format': 'pt'})
+            else:
+                torch.save(v_head_state_dict, os.path.join(output_dir, 'value_head.bin'))
         elif is_instance_of_ms_model(self.model):
             if use_flash_ckpt:
                 PreTrainedModel.save_pretrained(
@@ -368,31 +327,21 @@ class SwiftMixin:
             else:
                 # modelscope save_pretrained does not support safe_serialization
                 PreTrainedModel.save_pretrained(
-                    self.model, output_dir, state_dict=state_dict, safe_serialization=safe_serialization)
-        elif self.args.tuner_type in tuners_map:
-            tuners_map[self.args.tuner_type].save_pretrained(
-                self.model, output_dir, state_dict=state_dict, safe_serialization=safe_serialization)
+                    self.model, output_dir, state_dict=state_dict, safe_serialization=save_safetensors)
+        elif self.args.train_type in extra_tuners:
+            extra_tuners[self.args.train_type].save_pretrained(
+                self.model, output_dir, state_dict=state_dict, safe_serialization=save_safetensors)
         else:
             if self.model.__class__.__name__ != 'SentenceTransformer':
-                save_kwargs = {'state_dict': state_dict, 'max_shard_size': self.args.max_shard_size}
-                if isinstance(self.model, PeftModel):
-                    save_kwargs['selected_adapters'] = ['default']
                 if use_flash_ckpt:
                     self.model.save_pretrained(
                         output_dir,
+                        state_dict=state_dict,
                         safe_serialization=False,
-                        save_function=self.flash_checkpointer.ckpt_agent.save,
-                        **save_kwargs)
+                        save_function=self.flash_checkpointer.ckpt_agent.save)
                 else:
-                    self.model.save_pretrained(output_dir, safe_serialization=safe_serialization, **save_kwargs)
+                    self.model.save_pretrained(output_dir, state_dict=state_dict, safe_serialization=save_safetensors)
             else:
-                # `Trainer.save_model` calls `self._save(output_dir)` without a state_dict
-                # on the plain/DDP path (transformers only passes one for FSDP/DeepSpeed).
-                # The None fill-in above is skipped for SentenceTransformer models (they are
-                # in `supported_names`), so materialize it here before the ST save branch
-                # consumes it via `state_dict.items()`.
-                if state_dict is None:
-                    state_dict = self.model.state_dict()
 
                 @contextmanager
                 def save_context():
@@ -414,8 +363,9 @@ class SwiftMixin:
                             safe_serialization=False,
                             save_function=self.flash_checkpointer.ckpt_agent.save)
                     else:
-                        self.model.save_pretrained(output_dir, safe_serialization=safe_serialization)
+                        self.model.save_pretrained(output_dir, safe_serialization=save_safetensors)
                         # copy sentencetransformers files
+                    from swift.utils import copy_files_by_pattern
                     copy_files_by_pattern(
                         self.model.model_dir, output_dir, '*.py', exclude_patterns=['model.safetensors.index.json'])
                     copy_files_by_pattern(
@@ -442,6 +392,7 @@ class SwiftMixin:
         is_adapter = isinstance(self.model, (SwiftModel, PeftModel))
         # tokenizer
         if not is_adapter:
+            from swift.llm import save_checkpoint
             additional_saved_files = self.model_meta.additional_saved_files
             save_checkpoint(
                 None,
@@ -459,24 +410,7 @@ class SwiftMixin:
         last_step = self._get_last_checkpoint_step()
 
         # Check if we should delete older checkpoint(s)
-        if hasattr(self, '_sorted_checkpoints'):
-            checkpoints_sorted = self._sorted_checkpoints(use_mtime=use_mtime, output_dir=output_dir)
-        else:
-            output_dir = output_dir if output_dir is not None else self.args.output_dir
-            if sort_checkpoints is not None:
-                checkpoints_sorted = sort_checkpoints(
-                    output_dir=output_dir,
-                    checkpoint_prefix=PREFIX_CHECKPOINT_DIR,
-                    use_mtime=use_mtime,
-                    best_model_checkpoint=self.state.best_model_checkpoint,
-                )
-            else:
-                checkpoints = []
-                for path in os.listdir(output_dir) if os.path.isdir(output_dir) else []:
-                    if re.match(f'^{PREFIX_CHECKPOINT_DIR}-([0-9]+)$', path):
-                        checkpoints.append(os.path.join(output_dir, path))
-                ordering = os.path.getmtime if use_mtime else lambda path: int(path.rsplit('-', 1)[-1])
-                checkpoints_sorted = sorted(checkpoints, key=ordering)
+        checkpoints_sorted = self._sorted_checkpoints(use_mtime=use_mtime, output_dir=output_dir)
 
         valid_checkpoints = []
         for path in checkpoints_sorted:
@@ -526,61 +460,13 @@ class SwiftMixin:
             step = int(f.read())
         return step
 
-    def get_resume_checkpoint(self):
-        """
-        Get the path of the last complete checkpoint. Some latter directories
-        may not have the complete checkpoint because the asynchronous
-        persistence may not finish. The step in the `dlrover_latest.txt` is
-        the last step of complete checkpoint. We can get the path by the step.
-        """
-        resume_dir = get_resume_dir(self.args.output_dir)
-        if resume_dir is None:
-            return None
-        tracer_file = os.path.join(resume_dir, 'dlrover_latest.txt')
-        if not os.path.exists(tracer_file):
-            return None
-        with open(tracer_file, 'r') as f:
-            step = int(f.read())
-        checkpoint_folder = f'{PREFIX_CHECKPOINT_DIR}-{step}'
-
-        ckpt_dir = os.path.join(resume_dir, checkpoint_folder)
-        with open(os.path.join(ckpt_dir, TRAINER_STATE_NAME), 'r', encoding='utf-8') as f:
-            train_state = json.load(f)
-        if train_state is not None and train_state.get('max_steps') == step:
-            return None
-        return ckpt_dir
-
-    def get_resume_checkpoint_until_find_ucp(self):
-        resume_dir = get_resume_dir(self.args.output_dir)
-        if resume_dir is None:
-            return None
-        tracer_file = os.path.join(resume_dir, 'ucp.txt')
-        if not os.path.exists(tracer_file):
-            step = 0
-            if step == 0:
-                return None
-        with open(tracer_file, 'r') as f:
-            step = int(f.read())
-        checkpoint_folder = f'{PREFIX_CHECKPOINT_DIR}-{step}'
-        ckpt_dir = os.path.join(resume_dir, checkpoint_folder)
-        return ckpt_dir
-
-    def wait_latest_checkpoint(self, timeout=None, max_steps=None):
+    def wait_latest_checkpoint(self, timeout=FLASH_CKPT_WAIT_TIMEOUT):
         """
         Wait for the latest checkpoint.
         Args:
             timeout (second): The timeout to wait.
         """
-        wait_latest_checkpoint = self.flash_checkpointer.async_save_engine.wait_latest_checkpoint
-        # Older dlrover releases track the latest step themselves and do not accept it.
-        if accepts_parameter(wait_latest_checkpoint, 'max_steps'):
-            wait_latest_checkpoint(timeout, max_steps)
-        else:
-            wait_latest_checkpoint(timeout)
-        # The last saves only became complete during the wait above, so the symlink is stale by now. No
-        # barrier here: the wait already guarantees the checkpoint is durable, and this also runs on the
-        # teardown path, where a rank that already died would never reach it.
-        self._update_last_checkpoint_symlink(barrier=False)
+        self.flash_checkpointer.async_save_engine.wait_latest_checkpoint(timeout)
 
     def _fix_zero3_gather_all_parameters(self) -> None:
         if is_deepspeed_zero3_enabled() and not hasattr(self.deepspeed, '_zero3_consolidated_16bit_state_dict_origin'):
@@ -610,22 +496,12 @@ class SwiftMixin:
         else:
             result = super()._save_checkpoint(*args, **kwargs)
         logger.info(f'Saving model checkpoint to {self.state.last_model_checkpoint}')
-        self._update_last_checkpoint_symlink()
         return result
 
-    def _update_last_checkpoint_symlink(self, barrier: bool = True):
-        if barrier and dist.is_initialized():
-            dist.barrier()
-        if not self.args.should_save:
-            return
-        checkpoint_dir = self.get_last_checkpoint() if self.args.use_flash_ckpt else self.state.last_model_checkpoint
-        if checkpoint_dir:
-            update_last_checkpoint_symlink(checkpoint_dir)
-
     def _save_flash_checkpoint(self, model, trial, metrics=None):
-        from dlrover.trainer.torch.flash_checkpoint.hf_trainer import HfDdpCheckpointer, HfDeepSpeedCheckpointer
         from transformers.trainer import DeepSpeedSchedulerWrapper
         from transformers.trainer_utils import SaveStrategy
+        from dlrover.trainer.torch.flash_checkpoint.hf_trainer import HfDdpCheckpointer, HfDeepSpeedCheckpointer
         run_dir = self._get_output_dir(trial=trial)
 
         torch_native_save = torch.save
@@ -713,22 +589,10 @@ class SwiftMixin:
                 rng_states,
                 os.path.join(output_dir, f'rng_state_{self.args.process_index}.pth'),
             )
-        if self.args.safe_serialization:
-            replace_index_file(output_dir)
 
         torch.save = torch_native_save
-        save_to_storage = self.flash_checkpointer.save_checkpoint_to_storage
-        # The final checkpoint must not be dropped, hence the blocking save. Older dlrover releases have no
-        # such argument, so only pass it when it is accepted.
-        if self.state.global_step == self.state.max_steps and accepts_parameter(save_to_storage, 'blocking'):
-            success = save_to_storage(self.state.global_step, True)
-        else:
-            success = save_to_storage(self.state.global_step)
-
-        # dlrover replicates the state dict across ranks, so only the rank that owns the shared memory reports
-        # success; the others get False without anything going wrong. Cleaning up an incomplete checkpoint has
-        # to be left to the rank that wrote the directory, otherwise it deletes the files the others just saved.
-        if not success and self.args.should_save:
+        success = self.flash_checkpointer.save_checkpoint_to_storage(self.state.global_step)
+        if not success:
             logger.info(f'Skip saving the checkpoint of step {self.state.global_step} '
                         'because the latest checkpoint is not finished.')
             shutil.rmtree(output_dir, ignore_errors=True)
@@ -744,32 +608,12 @@ class SwiftMixin:
     @contextmanager
     def _fix_grad_norm_nan():
         from accelerate import Accelerator
-        from accelerate.utils import DistributedType
         origin_clip_grad_norm_ = Accelerator.clip_grad_norm_
 
         def clip_grad_norm_(self, parameters, *args, **kwargs):
             # If NaN occurs, ignore weight updates.
             parameters = list(parameters)
-            cpu_offloaded_fsdp2 = (
-                self.distributed_type == DistributedType.FSDP and self.is_fsdp2
-                and any(p.grad is not None and p.grad.is_cpu for p in parameters))
-            if cpu_offloaded_fsdp2:
-                self.unscale_gradients()
-                max_norm = args[0] if args else kwargs['max_norm']
-                norm_type = args[1] if len(args) > 1 else kwargs.get('norm_type', 2)
-                norm_type = float(norm_type)
-                grads = [p.grad for p in parameters if p.grad is not None]
-                foreach_norm = getattr(torch, '_foreach_norm', None)
-                if foreach_norm is None:
-                    grad_norms = [torch.linalg.vector_norm(grad, ord=norm_type) for grad in grads]
-                else:
-                    grad_norms = foreach_norm(grads, norm_type)
-                grad_norm = torch.nn.utils.get_total_norm([norm.to(self.device) for norm in grad_norms], norm_type)
-                if hasattr(grad_norm, 'full_tensor'):
-                    grad_norm = grad_norm.full_tensor()
-                torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, grad_norm)
-            else:
-                grad_norm = origin_clip_grad_norm_(self, parameters, *args, **kwargs)
+            grad_norm = origin_clip_grad_norm_(self, parameters, *args, **kwargs)
             if isinstance(grad_norm, torch.Tensor) and grad_norm.isnan().item():
                 for p in parameters:
                     p.grad = None
@@ -786,11 +630,6 @@ class SwiftMixin:
             model = self.model.model
         else:
             model = self.model
-        task_type = self.task_type
-        sp_enabled = self.template.sequence_parallel_size > 1
-        pf_enabled = bool(self.template.padding_free)
-        padding_side = 'left' if pf_enabled else self.template.padding_side
-
         if 'SentenceTransformer' in model.__class__.__name__:
 
             def forward_transformer(transformer, features: Dict[str, torch.Tensor],
@@ -831,103 +670,60 @@ class SwiftMixin:
                                 hasattr(module, 'forward_kwargs') and key in module.forward_kwargs)
                         }
                     output = module(input, **module_kwargs)
-                    if idx == 0 and self.template.padding_free:
-                        output = revert_padding_free(output, input, padding_side)
+                    if idx == 0 and self.args.padding_free:
+                        output = revert_padding_free(output, input, self.args.padding_side)
                     input = output
                 return {'last_hidden_state': input['sentence_embedding']}
 
             model.forward = MethodType(forward_sentence_transformer, model)
-        else:
+        elif self.args.padding_free:
+            if self.args.task_type == 'embedding':
+                llm_model = get_lm_head_model(self.model, model_meta=self.model.model_meta)
 
-            def _register_llm_hooks_in_order(llm_model: nn.Module, hooks: List[Callable]):
-                # hooks are provided in desired execution order.
-                # We use prepend=True and register in reverse to preserve the order.
-                for hook in reversed(hooks):
-                    llm_model.register_forward_hook(hook, with_kwargs=True, prepend=True)
+                def revert_padding_free_hook(module, args, input, output):
+                    return revert_padding_free(output, input, self.args.padding_side)
 
-            def _get_hook_target_model(task_type_: str) -> nn.Module:
-                # For embedding, we hook on the LM-head model because embedding outputs are typically
-                # produced from `output.logits` by `patch_output_normalizer` (registered on LM-head model).
-                if task_type_ == 'embedding':
-                    return get_lm_head_model(self.model, model_meta=self.model.model_meta)
-                return get_llm_model(self.model, model_meta=self.model.model_meta)
+                llm_model.register_forward_hook(revert_padding_free_hook, with_kwargs=True, prepend=True)
+            elif self.args.task_type == 'seq_cls':
+                llm_model = get_llm_model(self.model, model_meta=self.model.model_meta)
 
-            # --- seq_cls / reranker / generative_reranker / embedding unified pipeline ---
-            if task_type in {'seq_cls', 'reranker', 'generative_reranker', 'embedding'}:
-                llm_model = _get_hook_target_model(task_type)
+                @wraps(model.forward.__func__)
+                def seq_cls_forward(model, *args, **kwargs):
 
-                hooks: List[Callable] = []
+                    def inner_forward(*args, **kwargs):
+                        output = llm_model.forward(*args, **kwargs)
+                        return revert_padding_free(output, kwargs, self.args.padding_side)
 
-                if sp_enabled:
+                    return transformers_seq_cls_forward(
+                        model, *args, origin_forward=inner_forward, padding_side=self.args.padding_side, **kwargs)
 
-                    def sp_gather_hook(module, args, input, output):
-                        return gather_sequence_parallel_outputs(output)
+                model.forward = MethodType(seq_cls_forward, model)
+            elif self.args.task_type == 'reranker':
+                llm_model = get_llm_model(self.model, model_meta=self.model.model_meta)
 
-                    hooks.append(sp_gather_hook)
+                @wraps(model.forward.__func__)
+                def reranker_forward(model, *args, **kwargs):
 
-                if pf_enabled:
-                    if sp_enabled:
+                    def inner_forward(*args, **kwargs):
+                        output = llm_model.forward(*args, **kwargs)
+                        return revert_padding_free(output, kwargs, self.args.padding_side)
 
-                        def revert_padding_free_hook(module, args, input, output):
-                            # Use full packed position ids cached by sequence_parallel.prepare_inputs
-                            position_ids = sequence_parallel.real_position_ids
-                            tmp_input = {'position_ids': position_ids}
-                            return revert_padding_free(output, tmp_input, padding_side)
-                    else:
+                    padding_free_fn = getattr(model, 'padding_free_fn', None)
+                    if callable(padding_free_fn):
+                        output = inner_forward(*args, **kwargs)
+                        return padding_free_fn(output, kwargs, self.args.padding_side)
 
-                        def revert_padding_free_hook(module, args, input, output):
-                            return revert_padding_free(output, input, padding_side)
+                    return transformers_seq_cls_forward(
+                        model, *args, origin_forward=inner_forward, padding_side=self.args.padding_side, **kwargs)
 
-                    hooks.append(revert_padding_free_hook)
+                model.forward = MethodType(reranker_forward, model)
+            elif self.args.task_type == 'generative_reranker':
+                llm_model = get_llm_model(self.model, model_meta=self.model.model_meta)
 
-                if hooks:
-                    _register_llm_hooks_in_order(llm_model, hooks)
+                def revert_padding_free_hook(module, args, input, output):
+                    return revert_padding_free(output, input, self.args.padding_side)
 
-                # wrappers for seq_cls / reranker (pooling/head must see gathered/reverted outputs)
-                if task_type in {'seq_cls', 'reranker'} and (sp_enabled or pf_enabled):
-                    lm_head_model = get_lm_head_model(self.model, model_meta=self.model.model_meta)
-
-                    if task_type == 'seq_cls':
-
-                        @wraps(model.forward.__func__)
-                        def seq_cls_forward(model, *args, **kwargs):
-                            sp_kwargs = dict(kwargs)
-
-                            def inner_forward(*args, **_kwargs):
-                                return llm_model(*args, **_kwargs)
-
-                            return transformers_seq_cls_forward(
-                                lm_head_model,
-                                *args,
-                                origin_forward=inner_forward,
-                                padding_side=padding_side,
-                                **sp_kwargs,
-                            )
-
-                        model.forward = MethodType(seq_cls_forward, model)
-                    else:
-
-                        @wraps(model.forward.__func__)
-                        def reranker_forward(model, *args, **kwargs):
-                            sp_kwargs = dict(kwargs)
-
-                            def inner_forward(*args, **_kwargs):
-                                return llm_model(*args, **_kwargs)
-
-                            padding_free_fn = getattr(model, 'padding_free_fn', None)
-                            if callable(padding_free_fn):
-                                output = inner_forward(*args, **sp_kwargs)
-                                return padding_free_fn(output, sp_kwargs, padding_side)
-
-                            return transformers_seq_cls_forward(
-                                lm_head_model,
-                                *args,
-                                origin_forward=inner_forward,
-                                padding_side=padding_side,
-                                **sp_kwargs,
-                            )
-
-                        model.forward = MethodType(reranker_forward, model)
+                llm_model.register_forward_hook(revert_padding_free_hook, with_kwargs=True, prepend=True)
 
     def _fix_gradient_checkpointing(self):
         # fix use_reentrant
@@ -960,8 +756,9 @@ class SwiftMixin:
             pass
 
     def _prepare_gradient_checkpointing(self, model) -> None:
+        from swift.llm import HfConfigFactory, deep_getattr, dynamic_gradient_checkpointing
         args = self.args
-        HfConfigFactory.set_config_attr(model.config, 'use_cache', False)
+        HfConfigFactory.set_model_config_attr(model, 'use_cache', False)
         if args.gradient_checkpointing or args.vit_gradient_checkpointing:
             dynamic_gradient_checkpointing(model, args.vit_gradient_checkpointing)
         gc_kwargs = {}
@@ -985,7 +782,7 @@ class SwiftMixin:
                         else:
                             vision_tower.gradient_checkpointing_disable()
                             vision_tower.disable_input_require_grads()
-                    except (NotImplementedError, AttributeError, ValueError) as e:
+                    except (NotImplementedError, AttributeError) as e:
                         logger.warning(f'prepare gradient_checkpointing failed: {e}')
         # Avoid vit_gradient_checkpointing being overwritten by transformers.Trainer.gradient_checkpointing_enable.
         self.args.gradient_checkpointing = False
@@ -1012,8 +809,7 @@ class SwiftMixin:
 
         # gradient_checkpointing
         gradient_checkpointing = self.args.gradient_checkpointing
-        base_model = self.template.get_base_model(self.accelerator.unwrap_model(self.model))  # fix peftmodel
-        self._prepare_gradient_checkpointing(base_model)
+        self._prepare_gradient_checkpointing(self.accelerator.unwrap_model(self.model))
         with self.hub.patch_hub(), self._fix_grad_norm_nan(), self._patch_skip_first_batches(
         ), self._patch_deepspeed_load_checkpoint():
             res = super().train(*args, **kwargs)
@@ -1067,11 +863,7 @@ class SwiftMixin:
             self.control.should_log = False
 
             # all_gather + mean() to get average loss over all processes
-            if version.parse(transformers.__version__) >= version.parse('5.2.0'):
-                from transformers.trainer_pt_utils import nested_gather
-                tr_loss_scalar = nested_gather(tr_loss, self.args.parallel_mode).mean().item()
-            else:
-                tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
+            tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
             loss = tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged)
             logs: Dict[str, float] = {'loss': loss}  # loss first
             if version.parse(transformers.__version__) >= version.parse('4.38'):
@@ -1095,92 +887,78 @@ class SwiftMixin:
                 self.control.should_evaluate = False
         super()._maybe_log_save_evaluate(tr_loss, *args, **kwargs)
 
-    def create_loss_and_eval_metric(self, args):
+    def create_loss_and_metric(self, args):
         res = {}
-        if args.eval_metric is not None:
-            eval_metric = eval_metrics_map[args.eval_metric](args, self)
-            res['compute_metrics'], res['preprocess_logits_for_metrics'] = (eval_metric.compute_metrics,
-                                                                            eval_metric.preprocess_logits_for_metrics)
+        if args.metric is not None:
+            res['compute_metrics'], res['preprocess_logits_for_metrics'] = get_metric(args.metric)
         if args.loss_type is not None:
-            res['compute_loss_func'] = loss_map[args.loss_type](args, self)
+            res['compute_loss_func'] = get_loss_func(args.loss_type)
         return res
 
     def create_optimizer_and_scheduler(self, num_training_steps: int):
-        self.optimizer_callback.create_optimizer_and_scheduler(num_training_steps)
-
-    def _disable_foreach_for_deepspeed(self):
-        """Disable foreach for AdamW on torch<2.9 with DeepSpeed ZeRO-1/2 (no-op otherwise).
-
-        torch<2.9 `torch._foreach_*` kernels use a signed int32 element index and write out
-        of bounds when a flat tensor has numel > INT32_MAX.  DeepSpeed ZeRO-1/2 flattens each
-        param group into one FP32 flat partition per DP rank; for full-parameter SFT of large
-        models that partition can exceed the boundary and corrupt memory (loss NaN).  Falling
-        back to the single-tensor path (foreach=False) avoids the bug without changing the
-        optimizer's group layout or checkpoint format, and costs about the same as foreach
-        because ZeRO feeds the base optimizer a few large flat tensors rather than many
-        small ones (measured ~2% on the 2 GiB flat).
-        """
-        if version.parse(torch.__version__) >= version.parse('2.9.0'):
-            return
-        ds_config = getattr(self.args, 'deepspeed', None) or {}
-        # ZeRO-3 partitions parameters individually (no oversized flat tensor); only
-        # stage 1/2 flatten a whole group into one FP32 partition per rank.
-        if not isinstance(ds_config, dict) or ds_config.get('zero_optimization', {}).get('stage') not in (1, 2):
-            return
-        optimizer = self.optimizer
-        if optimizer is None or not isinstance(optimizer, torch.optim.AdamW):
-            return
-        optimizer.defaults['foreach'] = False
-        for group in optimizer.param_groups:
-            group['foreach'] = False
-        logger.info('[adamw-foreach] disabled foreach for DeepSpeed ZeRO on torch<2.9.')
-
-    def create_optimizer(self, model=None):
-        self._optimizer_ori = self.optimizer = self.optimizer_callback.create_optimizer(model=model)
-        if self.optimizer is not None:
-            self.optimizer.param_groups = [pg for pg in self.optimizer.param_groups if len(pg['params']) > 0]
-            self._disable_foreach_for_deepspeed()
-        return self.optimizer
-
-    def create_scheduler(self, num_training_steps: int, optimizer=None):
-        if optimizer is None:
-            # fix deepspeed & cosine_with_min_lr (transformers 5.8.0)
-            optimizer = getattr(self, '_optimizer_ori', None)
-        self.lr_scheduler = self.optimizer_callback.create_scheduler(num_training_steps, optimizer)
-        return self.lr_scheduler
-
-    @staticmethod
-    def _get_listwise_reranker_preds(logits, labels):
-        positive_indices = torch.nonzero(labels == 1, as_tuple=False).squeeze(-1).tolist()
-        positive_indices.append(labels.shape[0])
-        preds = []
-        for i in range(len(positive_indices) - 1):
-            start, end = positive_indices[i], positive_indices[i + 1]
-            preds.append(logits[start:end].argmax())
-        preds = torch.tensor(preds)
-        labels = torch.tensor([0] * (len(positive_indices) - 1))
-        return preds, labels
+        if self.args.optimizer is not None:
+            from swift.plugin import optimizers_map
+            optimizer_callback = optimizers_map[self.args.optimizer]
+            self.optimizer, self.lr_scheduler = optimizer_callback(self.args, self.model, self.train_dataset)
+            if self.optimizer is None:
+                self.create_optimizer()
+            if self.lr_scheduler is None:
+                self.create_scheduler(num_training_steps=num_training_steps, optimizer=self.optimizer)
+        else:
+            super().create_optimizer_and_scheduler(num_training_steps=num_training_steps)
 
     def _compute_acc(self, outputs, labels, cu_seqlens=None) -> None:
         args = self.args
         logits = outputs.logits
         metrics = None
-        task_type = self.task_type
-        problem_type = self.problem_type
-        if task_type == 'embedding':
-            return
-        elif task_type == 'seq_cls':
-            if problem_type == 'regression':
-                return
-            elif problem_type == 'multi_label_classification':
-                preds = logits.sigmoid() > 0.5
-                metrics = {'acc': (labels == preds).all(dim=-1)}
-            else:
-                preds = logits.argmax(dim=-1)
-                metrics = compute_acc(preds, labels)
-        elif task_type == 'causal_lm':
+        if getattr(args, 'loss_type', None) in {'generative_reranker', 'listwise_generative_reranker'} \
+                and logits is not None and logits.dim() == 3:
+            tokenizer = getattr(self, 'processing_class', None)
+            if tokenizer is None and getattr(self, 'template', None) is not None:
+                tokenizer = self.template.tokenizer
+            if tokenizer is None:
+                raise RuntimeError('tokenizer not available for generative_reranker acc')
+
+            positive_token = os.environ.get('GENERATIVE_RERANKER_POSITIVE_TOKEN', 'yes')
+            negative_token = os.environ.get('GENERATIVE_RERANKER_NEGATIVE_TOKEN', 'no')
+
+            try:
+                positive_token_id = tokenizer.convert_tokens_to_ids(positive_token)
+                negative_token_id = tokenizer.convert_tokens_to_ids(negative_token)
+            except Exception as e:
+                logger.warning(f'Failed to convert reranker tokens to ids: {e}')
+                positive_token_id = None
+                negative_token_id = None
+
+            if isinstance(positive_token_id, int) and isinstance(negative_token_id, int) \
+                    and positive_token_id >= 0 and negative_token_id >= 0:
+                positive_logits = logits[:, -1, positive_token_id]
+                negative_logits = logits[:, -1, negative_token_id]
+                binary_preds = (positive_logits > negative_logits).long()
+                metrics = compute_acc(
+                    binary_preds,
+                    labels.long(),
+                    acc_strategy=args.acc_strategy,
+                    is_encoder_decoder=self.template.is_encoder_decoder,
+                    cu_seqlens=cu_seqlens)
+        elif logits.dim() == 1 or (logits.dim() == 2 and logits.size(-1) == 1):
+            if logits.dim() == 2:
+                logits = logits.squeeze(-1)
+            binary_preds = (logits > 0).long()
+            metrics = compute_acc(
+                binary_preds,
+                labels.long(),
+                acc_strategy=args.acc_strategy,
+                is_encoder_decoder=self.template.is_encoder_decoder,
+                cu_seqlens=cu_seqlens)
+        elif self.args.task_type == 'seq_cls' and self.args.problem_type == 'multi_label_classification':
+            # TODO: compat padding_free
+            preds = logits.sigmoid() > 0.5
+            metrics = {'acc': (labels == preds).all(dim=-1)}
+        else:
             preds = logits.argmax(dim=-1)
             if self.template.sequence_parallel_size > 1:
+                from swift.trainers.sequence_parallel import sequence_parallel
                 # Gather preds and labels across the sp group
                 if isinstance(preds, np.ndarray):
                     preds = torch.from_numpy(preds).to(get_current_device())
@@ -1206,14 +984,7 @@ class SwiftMixin:
                 acc_strategy=args.acc_strategy,
                 is_encoder_decoder=self.template.is_encoder_decoder,
                 cu_seqlens=cu_seqlens)
-        elif task_type in {'generative_reranker', 'reranker'}:
-            if logits.dim() == 2:
-                logits = logits.squeeze(-1)
-            if args.loss_type == 'listwise_reranker':
-                preds, labels = self._get_listwise_reranker_preds(logits, labels)
-            else:
-                preds = (logits > 0).long()
-            metrics = compute_acc(preds, labels.long())
+
         if metrics:
             mode = 'train' if self.model.training else 'eval'
             for k, v in metrics.items():
@@ -1221,20 +992,16 @@ class SwiftMixin:
 
     @torch.no_grad()
     def _evalscope_eval(self):
+        from ..llm.eval.utils import EvalModel
         from evalscope import TaskConfig, run_task
 
-        from ..pipelines.eval.utils import EvalModel
-
         self.model.eval()
-        template = copy(self.template)
-        template.packing = False
-        template.padding_free = False
         # prepare task config
         task_config_kwargs = dict(
             model=EvalModel(
                 model_name=f'model-step{self.state.global_step}',
                 model=self.model,
-                template=template,
+                template=self.template,
                 max_batch_size=self.args.per_device_eval_batch_size,
             ),
             eval_type='swift_custom',
@@ -1280,15 +1047,15 @@ class SwiftMixin:
         inputs['logits_to_keep'] = logits_to_keep
 
     def get_cu_seqlens(self, position_ids, logits_to_keep) -> torch.Tensor:
+        from swift.llm import get_packed_seq_params
         cu_seqlens = get_packed_seq_params(position_ids)['cu_seq_lens_q']
+        res_cu_seqlens = cu_seqlens.clone()
         if isinstance(logits_to_keep, torch.Tensor):
-            kept_cumsum = logits_to_keep.to(cu_seqlens.dtype).cumsum(dim=0, dtype=cu_seqlens.dtype)
-            kept_cumsum = torch.cat((cu_seqlens.new_zeros(1), kept_cumsum))
-            res_cu_seqlens = kept_cumsum[cu_seqlens.long()]
-        else:
-            res_cu_seqlens = cu_seqlens.clone()
-            if isinstance(logits_to_keep, int):
-                res_cu_seqlens[1:] -= position_ids.shape[-1] + 1 - logits_to_keep
+            for i in range(cu_seqlens.shape[0] - 1):
+                start, end = cu_seqlens[i], cu_seqlens[i + 1]
+                res_cu_seqlens[i + 1:] -= (~logits_to_keep[start:end]).sum()
+        elif isinstance(logits_to_keep, int):
+            res_cu_seqlens[1:] -= position_ids.shape[-1] + 1 - logits_to_keep
         return res_cu_seqlens
 
     @contextmanager
@@ -1299,9 +1066,7 @@ class SwiftMixin:
         def skip_first_batches(dataloader, num_batches=0):
             if isinstance(dataloader, (DataLoaderShard, DataLoaderDispatcher)):
                 # DataLoaderMixin
-                new_dataloader = self.get_train_dataloader(skip_batches=num_batches)
-                self._restore_dataloader_epoch(dataloader, new_dataloader)
-                return new_dataloader
+                return self.get_train_dataloader(skip_batches=num_batches)
             else:
                 return origin_skip_first_batches(dataloader, num_batches)
 
@@ -1311,44 +1076,13 @@ class SwiftMixin:
         finally:
             trainer.skip_first_batches = origin_skip_first_batches
 
-    @staticmethod
-    def _restore_dataloader_epoch(dataloader, new_dataloader) -> None:
-        """Keep the in-progress epoch's permutation when rebuilding a dataloader.
-
-        HF Trainer applies ``set_epoch`` to the original dataloader before
-        ``skip_first_batches`` (transformers <= 4.x). The rebuilt dataloader would
-        otherwise replay the epoch-0 permutation and re-train already-seen samples
-        (https://github.com/modelscope/ms-swift/issues/10050).
-        """
-        sampler = getattr(dataloader, 'batch_sampler', None)
-        while sampler is not None and not hasattr(sampler, 'set_epoch'):
-            # Unwrap e.g. accelerate's SkipBatchSampler.
-            sampler = getattr(sampler, 'batch_sampler', None)
-        epoch = None
-        if sampler is not None:
-            curr_seed = getattr(sampler, 'curr_seed', None)
-            base_seed = getattr(sampler, 'base_seed', None)
-            if curr_seed is not None and base_seed is not None:
-                epoch = curr_seed - base_seed
-            else:
-                epoch = getattr(sampler, 'epoch', None)
-        if epoch is not None and hasattr(new_dataloader, 'set_epoch'):
-            new_dataloader.set_epoch(epoch)
-
 
 class DataLoaderMixin:
 
-    @staticmethod
-    def _maybe_multiprocessing_context(args) -> dict:
-        # Honor --dataloader_multiprocessing_context, but only when workers actually exist: the kwarg is
-        # meaningless (and rejected by some DataLoader variants) when num_workers == 0.
-        mp_context = getattr(args, 'dataloader_multiprocessing_context', None)
-        if mp_context is not None and args.dataloader_num_workers > 0:
-            return {'multiprocessing_context': mp_context}
-        return {}
-
     def get_sp_dataloader(self, dataset, batch_size, skip_batches=0):
-
+        from swift.trainers.sequence_parallel import sequence_parallel
+        from swift.trainers.sequence_parallel.utils import SequenceParallelSampler
+        from swift.trainers.sequence_parallel.utils import SequenceParallelDispatcher
         data_collator = self.data_collator
         if isinstance(dataset, datasets.Dataset):
             dataset = self._remove_unused_columns(dataset, description='training')
@@ -1363,7 +1097,6 @@ class DataLoaderMixin:
                 'pin_memory': self.args.dataloader_pin_memory,
                 'persistent_workers': self.args.dataloader_persistent_workers,
             }
-            dataloader_params.update(self._maybe_multiprocessing_context(self.args))
 
             if not isinstance(dataset, torch.utils.data.IterableDataset):
                 if skip_batches > 0:
@@ -1372,7 +1105,7 @@ class DataLoaderMixin:
                 dataloader_params['sampler'] = sampler
                 dataloader_params['drop_last'] = self.args.dataloader_drop_last
                 dataloader_params['worker_init_fn'] = partial(
-                    seed_worker, num_workers=self.args.dataloader_num_workers, rank=sequence_parallel.dp_rank)
+                    seed_worker, num_workers=self.args.dataloader_num_workers, rank=self.args.process_index)
 
             return DataLoaderShard(dataset, device=self.accelerator.device, **dataloader_params)
         else:
@@ -1383,7 +1116,6 @@ class DataLoaderMixin:
                 'persistent_workers': self.args.dataloader_persistent_workers,
                 'prefetch_factor': self.args.dataloader_prefetch_factor
             }
-            dataloader_params.update(self._maybe_multiprocessing_context(self.args))
             if dist.is_initialized() and dataloader_params['prefetch_factor']:
                 dataloader_params['prefetch_factor'] = dataloader_params['prefetch_factor'] * dist.get_world_size()
             dataloader = DataLoader(dataset, batch_size=batch_size, **dataloader_params)
@@ -1409,7 +1141,6 @@ class DataLoaderMixin:
                 'persistent_workers': args.dataloader_persistent_workers,
                 'prefetch_factor': args.dataloader_prefetch_factor
             }
-            dataloader_params.update(self._maybe_multiprocessing_context(args))
             batch_sampler_params = {
                 'drop_last':
                 args.dataloader_drop_last,
@@ -1423,9 +1154,6 @@ class DataLoaderMixin:
             }
 
             if hasattr(train_dataset, '__len__'):
-                if args.group_by_length:
-                    batch_sampler_params['group_by_length'] = args.group_by_length
-                    batch_sampler_params['lengths'] = train_dataset['lengths']
                 batch_sampler = BatchSamplerShard(
                     len(train_dataset), batch_size=self._train_batch_size, **batch_sampler_params)
                 dataloader_params['worker_init_fn'] = partial(
@@ -1443,27 +1171,6 @@ class DataLoaderMixin:
                 dataloader = DataLoaderDispatcher(dataloader, self.accelerator.device, skip_batches=skip_batches)
         return dataloader
 
-    @contextmanager
-    def _disable_group_by_length(self):
-        group_by_length = getattr(self.args, 'group_by_length', False)
-        self.args.group_by_length = False
-        try:
-            yield
-        finally:
-            self.args.group_by_length = group_by_length
-
-    def _get_dataloader(self, *args, **kwargs):
-        # Transformers' own dataloaders (eval/predict) don't expose `multiprocessing_context`; patch it in
-        # after construction so `--dataloader_multiprocessing_context` governs them too. DataLoader workers
-        # are created lazily on the first iteration, so setting it before then takes effect.
-        dataloader = super()._get_dataloader(*args, **kwargs)
-        mp_context = getattr(self.args, 'dataloader_multiprocessing_context', None)
-        if mp_context is not None:
-            base = getattr(dataloader, 'base_dataloader', dataloader)
-            if getattr(base, 'num_workers', 0) and getattr(base, 'multiprocessing_context', None) is None:
-                base.multiprocessing_context = mp_context
-        return dataloader
-
     def get_eval_dataloader(self, eval_dataset=None):
         dataloader = None
         if self.template.sequence_parallel_size > 1:
@@ -1472,6 +1179,5 @@ class DataLoaderMixin:
             eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
             dataloader = self.get_sp_dataloader(eval_dataset, self.args.eval_batch_size)
         if dataloader is None:
-            with self._disable_group_by_length():
-                return super().get_eval_dataloader(eval_dataset=eval_dataset)
+            return super().get_eval_dataloader(eval_dataset=eval_dataset)
         return dataloader

@@ -1,5 +1,7 @@
 # GRPO
 
+GRPOTrainer underwent a code refactoring in ms-swift3.5. If you are using a swift version < 3.5, please refer to the [stable documentation](https://github.com/modelscope/ms-swift/blob/v3.4.1/docs/source/Instruction/GRPO.md).
+
 [GRPO (Group Relative Policy Optimization)](https://arxiv.org/abs/2402.03300) leverages intra-group relative advantage calculations to replace the independent value model in the PPO algorithm and directly incorporates KL divergence penalties into the loss function to improve training stability.
 
 ## Algorithm Overview
@@ -36,10 +38,10 @@ completions = rollout_function(
 )
 """
 completions = [
-    (completion 1) "The larger number is 9.9...",
-    (completion 2) "9.11 is bigger than...",
+    (completion 1) "The larger number is 9.11...",
+    (completion 2) "9.9 is bigger than...",
     ...
-    (completion 8) "After calculation, 9.9..."
+    (completion 8) "After calculation, 9.11..."
 ]
 """
 
@@ -47,7 +49,7 @@ completions = [
 # Evaluate generated completions using reward model
 rewards = reward_function(
     completions=completions,
-    ground_truth="9.9"  # Expected correct answer
+    ground_truth="9.11"  # Expected correct answer
 )
 """
 rewards = [
@@ -157,12 +159,6 @@ When running in Colocate mode, out-of-memory (OOM) issues may frequently occur. 
 --move_model_batches [批次数量]
 ```
 
-6. Store Megatron exported HF format weights for vLLM updates in CPU main memory to reduce GPU memory usage:
-
-```bash
---offload_bridge true
-```
-
 ### 2. Async(External) Mode
 
 Training and inference resources are separated, with a dedicated inference server deployed.
@@ -189,7 +185,7 @@ swift rollout \
 ```
 For more rollout parameters, refer to the [vllm arguments](../../../Instruction/Command-line-parameters.md#vllm-arguments) and [rollout arguments](../../../Instruction/Command-line-parameters.md#rollout-arguments)
 
-Note: When set `vllm_use_async_engine`, enabling only DP (Data Parallelism) may cause errors. [Related issue](https://github.com/vllm-project/vllm/issues/18567). If errors occur, try enabling both TP (Tensor Parallelism) and DP or upgrading vLLM.
+Note: When set `use_async_engine`, enabling only DP (Data Parallelism) may cause errors. [Related issue](https://github.com/vllm-project/vllm/issues/18567). If errors occur, try enabling both TP (Tensor Parallelism) and DP or upgrading vLLM.
 
 To configure the external vLLM server during training, use the following parameters:
 
@@ -201,11 +197,8 @@ To configure the external vLLM server during training, use the following paramet
 --vllm_server_timeout <timeout> \
 ```
 
-### Weight-Sync Acceleration
-
-Setting the following parameters optimizes weight synchronization speed for LoRA training by syncing only the LoRA adapter weights instead of the full model weights.
-
-> Note: This synchronization method may slightly impact vLLM inference speed.
+#### Weight-Sync Acceleration
+Swift 3.10 optimizes weight synchronization, and setting the following parameters can further improve the weight synchronization speed for LoRA training:
 
 ```bash
 # rollout(server mode)
@@ -220,27 +213,13 @@ swift rlhf \
     --vllm_mode colocate \
     --vllm_enable_lora true \
     ...
-
-# megatron grpo(colocate mode)
-swift megatron rlhf \
-    --rlhf_type grpo \
-    --vllm_mode colocate \
-    --vllm_enable_lora true \
-    ...
 ```
+Note: This optimization cannot be used in the following cases:
 
-**Multimodal ViT LoRA Sync:** If ViT LoRA is enabled during training (`freeze_vit false`),
-tower/connector LoRA support must also be enabled on the vLLM side.
+- Training the ViT layers of multimodal models (freeze_vit set to false)
+- MoE models
 
-pass via `vllm_engine_kwargs`:
-
-```bash
---vllm_engine_kwargs '{"enable_tower_connector_lora": true}'
-```
-
-This is an experimental vLLM feature, currently supporting models such as Qwen2.5-VL and Qwen3-VL.
-For model-specific support details, see the [vLLM documentation](https://docs.vllm.ai/en/latest/features/lora/)
-and the [vLLM issue](https://github.com/vllm-project/vllm/issues/31479).
+For implementation details, please refer to the [PR](https://github.com/modelscope/ms-swift/pull/5773)
 
 ## logged metrics
 - completions/mean_length: The average length of generated completions.
@@ -270,20 +249,6 @@ If the `log_entropy` parameter is set, additional entropy-related metrics will b
 
 If `top_entropy_quantile` is set to a value smaller than 1.0, the entropy threshold value will also be recorded:
 - entropy/threshold: Tokens with entropy below this value will be excluded from the loss calculation.
-
-Training-inference consistency metrics, prefixed with rollout_correction, requires setting `log_rollout_offpolicy_metrics=true` or `rollout_importance_sampling_mode`:
-- `kl` / `k3_kl`: KL divergence between training policy and rollout policy (direct estimator / K3 estimator)
-- `training_ppl` / `rollout_ppl`: Perplexity of training policy and rollout policy
-- `log_ppl_diff`: Log PPL difference, reflects the degree of distribution shift
-- `ppl_ratio`: PPL ratio
-- `chi2_token` / `chi2_seq`: Token/Sequence-level χ² divergence
-
-IS correction metrics (requires setting `rollout_importance_sampling_mode`):
-- `is_weight_mean`: Average importance sampling weight
-- `ess`: Effective Sample Size
-- `clipped_frac`: Fraction of samples that were truncated or masked
-
-> For detailed explanation of training-inference consistency metrics, please refer to [Training-Inference-Mismatch](../AdvancedResearch/training_inference_mismatch.md)
 
 If `log_completions` is set, the training dynamics will be saved in the output directory, including:
 - step: The training step at the time of logging.
@@ -322,9 +287,8 @@ effective_batch_size = num_processes * per_device_train_batch_size * gradient_ac
 During the sampling phase, the total batch size (completion-level) depends on the following:
 
 - If generation_batch_size is set, the total equals generation_batch_size.
-- If steps_per_generation is set, the total equals per_device_train_batch_size * steps_per_generation * num_processes.
-- By default, steps_per_generation is set to gradient_accumulation_steps, and generation_batch_size equals the per_device_train_batch_size * steps_per_generation * num_processes = per_device_train_batch_size * gradient_accumulation_steps * num_processes = effective_batch_size.
-
+- If steps_per_generation is set, the total equals steps_per_generation * effective_batch_size.
+- By default, it equals the effective batch size: num_processes * per_device_train_batch_size * gradient_accumulation_steps.
 During evaluation, the number of completions equals:
 
 ```
@@ -354,7 +318,7 @@ With `overlong_filter` enabled, all completions on a certain GPU were truncated.
 
 Refer to [issue](https://github.com/modelscope/ms-swift/issues/3912).
 
-**5. Why is the clip ratio always 0?**
+**5. Why is the clip ratio always 1?**
 
 The core purpose of the clip mechanism is to limit the magnitude of policy updates to prevent policy performance collapse due to excessively large updates (i.e., a drastic decline in performance after policy updates). The specific formula for the clip operation is as follows:
 
@@ -369,33 +333,38 @@ In the on-policy training process, since each update uses data generated by the 
 Thus, the importance sampling ratio is always 1, and the clip operation does not take effect.
 
 The algorithm becomes off-policy (near-on-policy) under the following parameter settings:
-1. num_iterations > 1, or
+1. num_iterations > 1
 2. gradient_accumulation_steps % steps_per_generation != 0
 
 Refer to [issue](https://github.com/huggingface/open-r1/issues/239#issuecomment-2646297851).
 
-**6. How to set the training `mini-batch size`**
+**6. Why is there a validation process even when `val_dataset` is not set, and how can I disable it?**
+
+When `val_dataset` is not explicitly passed, the `split_dataset_ratio` parameter is responsible for splitting part of the `dataset` into a validation dataset, which defaults to splitting 1% of the data. (In "ms-swift>=3.6", the default value of split_dataset_ratio will be changed from 0.01 to 0.)
+
+To disable the validation process, set `--split_dataset_ratio 0`.
+
+**7. How to set the training `mini-batch size`**
 
 In GRPO training, we can configure mini-batch updates in the following two ways:
 
-- Set `generation_batch_size` to be an integer multiple of the training global batch size (effective_batch_size).
-- Or set `steps_per_generation` to be an integer multiple of `gradient_accumulation_steps`.
+1. Configuration options:
+   - Set `generation_batch_size` to be an integer multiple of the training global batch size.
+   - Or set `steps_per_generation` to be an integer multiple of `gradient_accumulation_steps`.
 
-Typical configuration example:
-- When configured with:
-steps_per_generation = 16, gradient_accumulation_steps = 8, mini_batch_size = steps_per_generation / gradient_accumulation_steps = 2. The results from 1 rollout will be split into 2 mini-batch updates.
+2. Typical configuration example:
+   When configured with:
+   steps_per_generation = 16
+   gradient_accumulation_steps = 8
 
-**7. Difference between swift deploy and swift rollout**
+   The results from one rollout will be split into two mini-batch updates.
+
+**8. Difference between swift deploy and swift rollout**
 
 - swift deploy is primarily used for model deployment and inference. It supports various engines such as PT, vLLM, and SGLang, and is compatible with streaming inference as well as the OpenAI API format.
 
 - swift rollout, on the other hand, is dedicated to GRPO rollout acceleration. Currently, it only supports the vLLM engine and comes with built-in automatic weight synchronization.
 
-**8. How to disable the KL loss term**
+**9. How to disable the KL loss term**
 
 Set the parameter `--beta 0` to disable KL loss calculation. The reference model (ref model) will not be loaded in this case.
-
-
-## RL WeChat Group
-
-<img src="https://raw.githubusercontent.com/modelscope/ms-swift/main/docs/resources/wechat/grpo.png" width="250">

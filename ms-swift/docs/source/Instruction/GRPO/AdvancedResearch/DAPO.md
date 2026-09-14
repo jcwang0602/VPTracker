@@ -49,9 +49,8 @@ DAPO 使用token级归一化，避免了回答长度在损失计算上的偏差�
 
 使用参数
 
-- loss_type bnpo/dapo 来使用token级归一化
+- loss_type bnpo 来使用token级归一化
 
-> loss_type 计算公式可参考[文档](../DeveloperGuide/loss_types.md)
 
 ## Overlong Filtering
 DAPO 认为被强制截断的回复的奖励噪声较大，可能会导致模型难以区分质量问题和长度问题。为此，DAPO 筛除了训练中被截断的数据，使其不参与损失计算。
@@ -93,7 +92,7 @@ $$
 
 | 参数                 | 类型      | 值      |
 |----------------------|-----------|-------------|
-| `--loss_type`        | `str`     | `bnpo`/`dapo`|
+| `--loss_type`        | `str`     | `bnpo`     |
 | `--epsilon_high`     | `float`   | `0.28`      |
 | `--dynamic_sample`   | `bool`    | `true`      |
 | `--max_resample_times` | `int`   | `3`        |

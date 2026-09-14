@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import asyncio
 import os
 import subprocess
@@ -47,7 +47,7 @@ def run_command_in_background_with_popen(command, all_envs, log_file):
             env[k] = v
     daemon_kwargs = {}
     if sys.platform == 'win32':
-        from subprocess import CREATE_NO_WINDOW, DETACHED_PROCESS
+        from subprocess import DETACHED_PROCESS, CREATE_NO_WINDOW
         daemon_kwargs['creationflags'] = DETACHED_PROCESS | CREATE_NO_WINDOW
         daemon_kwargs['close_fds'] = True
     else:

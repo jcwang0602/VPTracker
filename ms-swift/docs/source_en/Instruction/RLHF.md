@@ -60,7 +60,7 @@ $
 - $m$: Margin term that encourages the model to distinguish between samples of different difficulty levels. The dataset needs to provide a `margin` column for this; by default, it is 0. This term is also introduced in [the paper](https://arxiv.org/pdf/2307.09288).
 
 
-Reference the training script [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/rm).
+Reference the training script [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/rm.sh).
 
 ## PPO
 [Paper on arXiv](https://arxiv.org/abs/2203.02155)
@@ -83,7 +83,7 @@ Hyperparameters:
 - lam: Lambda coefficient in [GAE](https://arxiv.org/abs/1506.02438), default is 0.95.
 - num_sample_generations: Number of debugging samples generated during training, default is 10.
 
-Note: When training the base model, perform SFT first and then proceed to RLHF. Specify the chat template, and it is recommended to use `full` for `tuner_type`.
+Note: When training the base model, perform SFT first and then proceed to RLHF. Specify the chat template, and it is recommended to use `full` for sft_type.
 
 Refer to the [documentation](https://huggingface.co/docs/trl/ppov2_trainer#explanation-of-the-logged-metrics) for metric explanations during training.
 

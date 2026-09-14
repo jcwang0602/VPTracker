@@ -1,4 +1,4 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 from typing import List
 
@@ -31,20 +31,21 @@ def infer_stream(engine: 'InferEngine', infer_request: 'InferRequest'):
 
 
 if __name__ == '__main__':
-    from swift import InferEngine, InferRequest, InferStats, RequestConfig, TransformersEngine, load_dataset
+    from swift.llm import InferEngine, InferRequest, PtEngine, RequestConfig, load_dataset
+    from swift.plugin import InferStats
     model = 'Qwen/Qwen2.5-1.5B-Instruct'
-    infer_backend = 'transformers'
+    infer_backend = 'pt'
 
-    if infer_backend == 'transformers':
-        engine = TransformersEngine(model, max_batch_size=64)
+    if infer_backend == 'pt':
+        engine = PtEngine(model, max_batch_size=64)
     elif infer_backend == 'vllm':
-        from swift.infer_engine import VllmEngine
+        from swift.llm import VllmEngine
         engine = VllmEngine(model, max_model_len=8192)
     elif infer_backend == 'sglang':
-        from swift.infer_engine import SglangEngine
+        from swift.llm import SglangEngine
         engine = SglangEngine(model)
     elif infer_backend == 'lmdeploy':
-        from swift.infer_engine import LmdeployEngine
+        from swift.llm import LmdeployEngine
         engine = LmdeployEngine(model)
 
     # Here, `load_dataset` is used for convenience; `infer_batch` does not require creating a dataset.

@@ -1,10 +1,12 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import gradio as gr
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from functools import partial
 from typing import Type
 
-from swift.model import ModelType, get_model_list
-from ..base import BaseUI
+import gradio as gr
+
+from swift.llm import ModelType
+from swift.llm.model.register import get_all_models
+from swift.ui.base import BaseUI
 
 
 class RLHF(BaseUI):
@@ -162,7 +164,7 @@ class RLHF(BaseUI):
                         elem_id='teacher_model',
                         scale=20,
                         value=None,
-                        choices=get_model_list(),
+                        choices=get_all_models(),
                         allow_custom_value=True)
                     gr.Dropdown(
                         elem_id='teacher_model_type',
@@ -172,7 +174,7 @@ class RLHF(BaseUI):
                         allow_custom_value=True)
                 with gr.Row():
                     gr.Dropdown(
-                        elem_id='ref_model', scale=20, value=None, choices=get_model_list(), allow_custom_value=True)
+                        elem_id='ref_model', scale=20, value=None, choices=get_all_models(), allow_custom_value=True)
                     gr.Dropdown(
                         elem_id='ref_model_type',
                         choices=ModelType.get_model_name_list(),
@@ -180,7 +182,7 @@ class RLHF(BaseUI):
                         scale=10,
                         allow_custom_value=True)
                     gr.Dropdown(
-                        elem_id='reward_model', scale=20, value=None, choices=get_model_list(), allow_custom_value=True)
+                        elem_id='reward_model', scale=20, value=None, choices=get_all_models(), allow_custom_value=True)
                     gr.Dropdown(
                         elem_id='reward_model_type',
                         choices=ModelType.get_model_name_list(),

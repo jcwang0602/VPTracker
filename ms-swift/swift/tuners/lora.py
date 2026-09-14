@@ -1,12 +1,13 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
-import peft
-import torch
 from dataclasses import asdict, dataclass, field
 from functools import reduce
+
+import peft
+import torch
 from packaging import version
-from transformers import Trainer as HfTrainer
+from transformers import Trainer
 
 from .lora_layers import *  # noqa
 from .utils import SwiftAdapter, SwiftConfig, SwiftOutput, set_adapter
@@ -106,7 +107,7 @@ class LoRA(SwiftAdapter):
                 'embedding': {},
             }
 
-            decay_parameters = HfTrainer.get_decay_parameter_names(None, model)
+            decay_parameters = Trainer.get_decay_parameter_names(None, model)
             for name, param in model.named_parameters():
                 if not param.requires_grad:
                     continue

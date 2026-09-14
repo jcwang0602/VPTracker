@@ -6,7 +6,7 @@ import os
 class TNLLTDataset(torch.utils.data.Dataset[dict[str, Any]]):
     def __init__(
         self,
-        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPTrack/data/tnllt",
+        root_dir="/mnt/shared-storage-user/mineru4s/jcwang/VPLT/data/tnllt",
         split_path="data_specs/tnllt_test_split.txt",
         finished_videos=[],
         seg_index=0,
@@ -71,7 +71,6 @@ class TNLLTDataset(torch.utils.data.Dataset[dict[str, Any]]):
             "language": language,
             "bboxes": bbox,
             "target_visible": target_visible,
-            "language_path": language_path,
         }
 
 

@@ -1,10 +1,6 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 import collections
-import gradio as gr
-import json
-import matplotlib.pyplot as plt
 import os
-import psutil
 import re
 import subprocess
 import sys
@@ -12,13 +8,18 @@ import time
 import webbrowser
 from datetime import datetime
 from functools import partial
-from packaging import version
-from transformers import is_tensorboard_available
 from typing import Dict, List, Tuple, Type
 
+import gradio as gr
+import json
+import matplotlib.pyplot as plt
+import psutil
+from packaging import version
+from transformers import is_tensorboard_available
+
+from swift.ui.base import BaseUI
+from swift.ui.llm_train.utils import close_loop, run_command_in_subprocess
 from swift.utils import TB_COLOR, TB_COLOR_SMOOTH, format_time, get_logger, read_tensorboard_file, tensorboard_smoothing
-from ..base import BaseUI
-from .utils import close_loop, run_command_in_subprocess
 
 logger = get_logger()
 
@@ -376,14 +377,14 @@ class Runtime(BaseUI):
             return cls.sft_plot
 
         args: dict = cls.parse_info_from_cmdline(task)[1]
-        rlhf_type = args.get('rlhf_type', 'dpo')
-        if rlhf_type in ('dpo', 'cpo', 'simpo'):
+        train_type = args.get('rlhf_type', 'dpo')
+        if train_type in ('dpo', 'cpo', 'simpo'):
             return cls.dpo_plot
-        elif rlhf_type == 'kto':
+        elif train_type == 'kto':
             return cls.kto_plot
-        elif rlhf_type == 'orpo':
+        elif train_type == 'orpo':
             return cls.orpo_plot
-        elif rlhf_type == 'grpo':
+        elif train_type == 'grpo':
             return cls.grpo_plot
 
     @classmethod
@@ -536,7 +537,7 @@ class Runtime(BaseUI):
         create_time_formatted = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d, %H:%M')
 
         return f'pid:{pid}/create:{create_time_formatted}' \
-               f'/running:{format_time(ts - create_time)}/cmd:{" ".join(proc.cmdline())}'
+               f'/running:{format_time(ts-create_time)}/cmd:{" ".join(proc.cmdline())}'
 
     @staticmethod
     def parse_info_from_cmdline(task):

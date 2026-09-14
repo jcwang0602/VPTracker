@@ -7,7 +7,7 @@ This document introduces how to register a multimodal model in ms-swift and succ
 
 ```shell
 # Avoid future incompatibilities with documentation
-pip install "ms-swift>=4.0"
+pip install "ms-swift>=3.9,<3.10"
 
 pip install "transformers==4.57.*" "qwen_omni_utils==0.0.8"
 ```
@@ -17,14 +17,15 @@ pip install "transformers==4.57.*" "qwen_omni_utils==0.0.8"
 First, we need to register the model to obtain the model and processor.
 
 ```python
-from transformers import AutoConfig, PretrainedConfig, PreTrainedModel
+from swift.llm import (
+    register_model, ModelMeta, ModelGroup, Model, register_model_arch, MultiModelKeys,
+    get_model_tokenizer_with_flash_attn, get_model_tokenizer
+)
+from swift.llm.model.model.qwen import patch_qwen_vl_utils
+from swift.llm.model.utils import use_submodel_func
+from swift.llm.model.patcher import patch_get_input_embeddings
+from swift.utils import get_env_args
 
-from swift.model import (Model, ModelGroup, ModelMeta, MultiModelKeys, get_model_processor, register_model,
-                         register_model_arch, ModelLoader)
-from swift.model.models.qwen import patch_qwen_vl_utils
-from swift.model.patcher import patch_get_input_embeddings
-from swift.model.utils import use_submodel_func
-from swift.utils import get_env_args, Processor
 
 register_model_arch(
     MultiModelKeys(
@@ -32,51 +33,40 @@ register_model_arch(
         # `freeze_llm`, `freeze_vit`, `freeze_aligner` behavior is determined by the values below.
         # For example: full parameter training, if `freeze_vit=True`, it will freeze parameters of model layers prefixed with `thinker.audio_tower` and `thinker.visual`.
         # LoRA training, if `freeze_vit=False`, it will additionally add LoRA to Linear layers prefixed with `thinker.audio_tower` and `thinker.visual`.
-        language_model=['thinker.model', 'thinker.lm_head'],
+        language_model='thinker.model',
         vision_tower=['thinker.audio_tower', 'thinker.visual'],
         aligner=['thinker.audio_tower.proj', 'thinker.visual.merger'],
         # Generator parts will never be trained or remain frozen.
-        # If you want `thinker.audio_tower` and `thinker.audio_tower.proj` to never be trained, you can place them in the generator and remove them from vision_tower and aligner.
         generator=['talker', 'token2wav'],
     ))
 
-class Qwen2_5OmniLoader(ModelLoader):
-
-
-    def get_config(self, model_dir: str) -> PretrainedConfig:
-        config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-        enable_audio_output = get_env_args('ENABLE_AUDIO_OUTPUT', bool, None)
-        if enable_audio_output is not None:
-            config.enable_audio_output = enable_audio_output
-        return config
-
-    def get_processor(self, model_dir: str, config: PretrainedConfig) -> Processor:
-        from transformers import Qwen2_5OmniProcessor
-        from qwen_omni_utils import vision_process
-        processor = Qwen2_5OmniProcessor.from_pretrained(model_dir, trust_remote_code=True)
-        # Control constants in qwen_omni_utils library via environment variables,
-        # e.g., `MAX_PIXELS`, etc.
-        patch_qwen_vl_utils(vision_process)
-        return processor
-
-    def get_model(self, model_dir: str, config: PretrainedConfig, processor: Processor,
-                  model_kwargs) -> PreTrainedModel:
-        from transformers import Qwen2_5OmniForConditionalGeneration
-        print('Run my_qwen2_5_omni...')
-        self.auto_model_cls = self.auto_model_cls or Qwen2_5OmniForConditionalGeneration
-        model = super().get_model(model_dir, config, processor, model_kwargs)
-        # For multimodal model consistency, we replace the model's forward/generate functions
-        # with those of its language_model.
+def get_model_tokenizer_qwen2_5_omni(model_dir, *args, **kwargs):
+    from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor, Qwen2_5OmniConfig
+    from qwen_omni_utils import vision_process
+    print('Run my_qwen2_5_omni...')
+    kwargs['automodel_class'] = kwargs['automodel_class'] or Qwen2_5OmniForConditionalGeneration
+    # Customize how to get tokenizer and config in `get_model_tokenizer_with_flash_attn`
+    processor = Qwen2_5OmniProcessor.from_pretrained(model_dir, trust_remote_code=True)
+    kwargs['tokenizer'] = processor.tokenizer
+    kwargs['model_config'] = Qwen2_5OmniConfig.from_pretrained(model_dir, trust_remote_code=True)
+    enable_audio_output = get_env_args('ENABLE_AUDIO_OUTPUT', bool, None)
+    if enable_audio_output is not None:
+        kwargs['model_config'].enable_audio_output = enable_audio_output
+    # Control constants in qwen_omni_utils library via environment variables, e.g., `MAX_PIXELS`, etc.
+    patch_qwen_vl_utils(vision_process)
+    # Recommended: Use this function to get model and tokenizer. Avoid using AutoModelForCausalLM directly (may cause incompatibility).
+    model, _ = get_model_tokenizer_with_flash_attn(model_dir, *args, **kwargs)
+    if model:
+        # For multimodal model consistency, we replace the model's forward/generate functions with those of its language_model.
         # Handle additional parts separately.
         use_submodel_func(model, 'thinker')
-        # Avoid inplace operations on leaf_variable during training
-        # (replacing parts of input_embeds with images_embeds)
-        patch_get_input_embeddings(model.thinker.visual, 'patch_embed')
-        # Some custom settings for model/config (usually not needed; configure based on
-        # specific model if errors occur during training/inference)
+        # Some custom settings for model/config (usually not needed; configure based on specific model if errors occur during training/inference)
         model.config.keys_to_ignore_at_inference += ['hidden_states', 'attention_mask']
         model.config.talker_config.pad_token_id = None
-        return model
+        # Avoid inplace operations on leaf_variable during training (replacing parts of input_embeds with images_embeds)
+        patch_get_input_embeddings(model.thinker.visual, 'patch_embed')
+    # Must return model and processor (multimodal) / tokenizer (text-only)
+    return model, processor
 
 
 register_model(
@@ -88,9 +78,9 @@ register_model(
                 Model('Qwen/Qwen2.5-Omni-7B', 'Qwen/Qwen2.5-Omni-7B'),
             ]),
         ],
+        'my_qwen2_5_omni',
         # Function to get model and processor.
-        Qwen2_5OmniLoader,
-        template='my_qwen2_5_omni',
+        get_model_tokenizer_qwen2_5_omni,
         is_multimodal=True,  # Whether it's a multimodal model
         model_arch='my_qwen2_5_omni',  # Usually set only for multimodal models
         # Used for automatic model_type matching
@@ -105,7 +95,7 @@ register_model(
 
 if __name__ == '__main__':
     # Test and debug
-    model, processor = get_model_processor('Qwen/Qwen2.5-Omni-7B', model_type='my_qwen2_5_omni')
+    model, processor = get_model_tokenizer('Qwen/Qwen2.5-Omni-7B', model_type='my_qwen2_5_omni')
 ```
 
 ## Template Registration
@@ -119,17 +109,18 @@ Template functions:
 3. Support mixed modality data training.
 
 ```python
-from functools import partial
-from typing import Any, Dict, List, Literal, Optional
-
-import torch
+from swift.llm import (
+    register_template, Template, get_packed_seq_params, to_float_dtype, TemplateMeta,
+    get_template, get_model_tokenizer
+)
 from transformers.integrations import is_deepspeed_zero3_enabled
-from swift import get_model_processor
-from swift.template import StdTemplateInputs, Template, TemplateMeta, get_template, register_template
-from swift.template.utils import Context, findall
-from swift.template.vision_utils import load_audio
-from swift.utils import Processor, get_env_args, get_logger, get_packed_seq_params, is_deepspeed_enabled, to_float_dtype
-
+from swift.llm.template.template_inputs import StdTemplateInputs
+from swift.llm.template.utils import Context, findall
+from swift.llm.template.vision_utils import load_audio
+from swift.utils import get_env_args, get_logger, is_deepspeed_enabled
+from functools import partial
+from typing import Dict, List, Any, Literal, Optional
+import torch
 
 logger = get_logger()
 
@@ -143,7 +134,7 @@ class Qwen2_5OmniTemplate(Template):
     # and will be printed in abbreviated form (calling `template.safe_decode`)
     placeholder_tokens = ['<|IMAGE|>', '<|AUDIO|>', '<|VIDEO|>']
 
-    def init_processor(self, processor: Processor) -> None:
+    def init_processor(self, processor) -> None:
         """Initialize some required constants when initializing the processor"""
         if processor is None:
             return
@@ -363,20 +354,10 @@ class Qwen2_5OmniTemplate(Template):
                 # Therefore, zero3 will hang in scenarios where different processes have different numbers of audios (requires modification of transformers code to fix). Use zero2 in this scenario.
                 input_features = input_ids.new_zeros([1, 128, 128], dtype=model.thinker.audio_tower.dtype)
                 feature_attention_mask = input_ids.new_ones([1, 128], dtype=torch.bool)
-                audio_res = model.thinker.get_audio_features(input_features, feature_attention_mask)
-                # Compatible with transformers 5.0
-                if hasattr(audio_res, 'last_hidden_state'):
-                    audio_embeds = audio_res.last_hidden_state
-                else:
-                    audio_embeds = audio_res
+                audio_embeds = model.thinker.get_audio_features(input_features, feature_attention_mask)
                 inputs_embeds = inputs_embeds + audio_embeds.mean() * 0.
         else:
-            audio_res = model.thinker.get_audio_features(input_features, feature_attention_mask)
-            # Compatible with transformers 5.0
-            if hasattr(audio_res, 'last_hidden_state'):
-                audio_embeds = audio_res.last_hidden_state
-            else:
-                audio_embeds = audio_res
+            audio_embeds = model.thinker.get_audio_features(input_features, feature_attention_mask)
             audio_mask = (input_ids == thinker_config.audio_token_index).unsqueeze(-1).expand_as(inputs_embeds)
             audio_embeds = audio_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_embeds)
@@ -437,7 +418,7 @@ class Qwen2_5OmniTemplate(Template):
         return res
 
     def generate(self, model, *args, **kwargs):
-        """`TransformersEngine` will call template.generate method for text generation; inherit here for customization."""
+        """`PtEngine` will call template.generate method for text generation; inherit here for customization."""
         if kwargs.get('video_grid_thw') is not None:
             kwargs['use_audio_in_video'] = self.use_audio_in_video
         return super().generate(model, *args, **kwargs)
@@ -453,8 +434,8 @@ register_template(
 
 if __name__ == '__main__':
     # Test and debug
-    model, processor = get_model_processor('Qwen/Qwen2.5-Omni-7B', model_type='my_qwen2_5_omni')
-    template = get_template(processor, template_type='my_qwen2_5_omni')
+    model, processor = get_model_tokenizer('Qwen/Qwen2.5-Omni-7B', model_type='my_qwen2_5_omni')
+    template = get_template('my_qwen2_5_omni', processor)
     data = {
         'messages': [
             {'role': 'user', 'content': 'Describe the video<video> and image<image> content.'},
@@ -472,14 +453,14 @@ if __name__ == '__main__':
 
 ## Inference Alignment
 
-Next, you need to align inference between TransformersEngine and transformers. Typically you need to align `input_ids` and output content. You can write the following test function:
+Next, you need to align inference between PtEngine and transformers. Typically you need to align `input_ids` and output content. You can write the following test function:
 
 ```python
 import os
 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
 from qwen_omni_utils import process_mm_info
 from modelscope import snapshot_download
-from swift.infer_engine import TransformersEngine, InferRequest, RequestConfig
+from swift.llm import PtEngine, InferRequest, RequestConfig
 import requests
 
 def infer_hf():
@@ -515,7 +496,7 @@ def infer_hf():
     return inputs['input_ids'][0].tolist(), text[0]
 
 def test_my_qwen2_5_omni():
-    engine = TransformersEngine('Qwen/Qwen2.5-Omni-7B', model_type='my_qwen2_5_omni', attn_impl='flash_attention_2')
+    engine = PtEngine('Qwen/Qwen2.5-Omni-7B', model_type='my_qwen2_5_omni', attn_impl='flash_attention_2')
     infer_request = InferRequest(messages=[{
         "role": "user",
         "content": "<video><image>Describe the video and image.",
@@ -524,14 +505,14 @@ def test_my_qwen2_5_omni():
         images=["http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/cat.png"],
     )
     request_config = RequestConfig(temperature=0, max_tokens=512)
-    input_ids = engine.template.encode(infer_request)['input_ids']
+    input_ids = engine.default_template.encode(infer_request)['input_ids']
     resp_list = engine.infer([infer_request], request_config)
     resp = resp_list[0].choices[0].message.content
     return input_ids, resp
 
 
 if __name__ == '__main__':
-    # Enable debug mode, will print input_ids and generate_ids from `TransformersEngine.infer`
+    # Enable debug mode, will print input_ids and generate_ids from `PtEngine.infer`
     os.environ['SWIFT_DEBUG'] = '1'
     input_ids_hf, response_hf = infer_hf()
     input_ids_swift, response_swift = test_my_qwen2_5_omni()
@@ -547,18 +528,18 @@ Train using Python code, which is usually easier to debug:
 
 
 ```python
-from swift import sft_main, SftArguments
+from swift.llm import sft_main, TrainArguments
 import os
 if __name__ == '__main__':
     os.environ['MAX_PIXELS'] = '1003520'
-    sft_main(SftArguments(
+    sft_main(TrainArguments(
         model='Qwen/Qwen2.5-Omni-7B',
-        dataset=['AI-ModelScope/LaTeX_OCR#5000'],
+        dataset='AI-ModelScope/LaTeX_OCR#5000',
         model_type='my_qwen2_5_omni',
         template='my_qwen2_5_omni',
         load_from_cache_file=True,
         split_dataset_ratio=0.01,
-        tuner_type='lora',
+        train_type='lora',
         torch_dtype='bfloat16',
         attn_impl='flash_attn',
         padding_free=True,
@@ -568,7 +549,7 @@ if __name__ == '__main__':
         learning_rate=1e-4,
         lora_rank=8,
         lora_alpha=32,
-        target_modules=['all-linear'],
+        target_modules='all-linear',
         freeze_vit=True,
         freeze_aligner=True,
         gradient_accumulation_steps=1,
@@ -598,19 +579,19 @@ swift sft \
     --model Qwen/Qwen2.5-Omni-7B \
     --model_type my_qwen2_5_omni \
     --template my_qwen2_5_omni \
-    --external_plugins 'examples/custom/my_qwen2_5_omni/my_register.py' \
+    --custom_register_path 'examples/custom/my_qwen2_5_omni/my_register.py' \
     --dataset 'AI-ModelScope/alpaca-gpt4-data-zh#2000' \
               'AI-ModelScope/LaTeX_OCR:human_handwrite#2000' \
               'speech_asr/speech_asr_aishell1_trainsets:validation#2000' \
               'swift/VideoChatGPT:all#2000' \
     --load_from_cache_file true \
     --split_dataset_ratio 0.01 \
-    --tuner_type lora \
+    --train_type lora \
     --torch_dtype bfloat16 \
     --attn_impl flash_attn \
     --padding_free true \
     --packing true \
-    --num_train_epochs 3 \
+    --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
     --learning_rate 1e-4 \
@@ -643,7 +624,7 @@ MAX_PIXELS=1003520 \
 swift infer \
     --adapters output/vx-xxx/checkpoint-xxx \
     --stream true \
-    --max_new_tokens 512 \
+    --max_new_tokens 2048 \
     --load_data_args true
 ```
 
@@ -655,13 +636,4 @@ swift export \
     --push_to_hub true \
     --hub_model_id '<your-model-id>' \
     --hub_token '<your-sdk-token>'
-```
-
-## Submitting a PR
-
-If you want to submit a PR to ms-swift, you need to run the following additional commands to lint and format the code:
-
-```shell
-pip install pre-commit
-pre-commit run --all-files
 ```

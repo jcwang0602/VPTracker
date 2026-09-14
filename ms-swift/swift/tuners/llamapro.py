@@ -1,12 +1,13 @@
-# Copyright (c) ModelScope Contributors. All rights reserved.
-import torch
+# Copyright (c) Alibaba, Inc. and its affiliates.
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
-from torch import nn
 from typing import Optional
 
-from swift.model import MODEL_ARCH_MAPPING, ModelKeys
-from swift.utils import HfConfigFactory, get_logger
+import torch
+from torch import nn
+
+from swift.llm import MODEL_ARCH_MAPPING, HfConfigFactory, ModelKeys
+from swift.utils.logger import get_logger
 from .utils import ActivationMixin, SwiftAdapter, SwiftConfig, SwiftOutput
 
 logger = get_logger()
@@ -145,7 +146,7 @@ class LLaMAPro(SwiftAdapter):
                     getattr(module, attention).layer_idx = idx
                 except AttributeError:
                     getattr(module, 'cross_attn').layer_idx = idx
-        elif model_type in ('chatglm', 'chatglm4'):
+        elif model_type in ('chatglm', 'glm4'):
             for idx, module in enumerate(module_list):
                 getattr(module, attention).layer_number = idx
         elif model_type in ('phi2', ):

@@ -1,7 +1,7 @@
 import os
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-os.environ['ASCEND_RT_VISIBLE_DEVICES'] = '0,1,2,3'
+
 kwargs = {
     'per_device_train_batch_size': 2,
     'per_device_eval_batch_size': 2,
@@ -26,11 +26,11 @@ kwargs = {
 
 
 def test_resume_from_checkpoint():
-    from swift import InferArguments, SftArguments, infer_main, sft_main
-    result = sft_main(SftArguments(**kwargs))
+    from swift.llm import sft_main, TrainArguments, infer_main, InferArguments
+    result = sft_main(TrainArguments(**kwargs))
     last_model_checkpoint = result['last_model_checkpoint']
     last_model_checkpoint = last_model_checkpoint.replace('checkpoint-10', 'checkpoint-5')
-    result2 = sft_main(SftArguments(**kwargs, resume_from_checkpoint=last_model_checkpoint))
+    result2 = sft_main(TrainArguments(**kwargs, resume_from_checkpoint=last_model_checkpoint))
     diff = abs(result['log_history'][6]['loss'] - result2['log_history'][6]['loss'])
     print(f'diff: {diff}')
     assert diff < 0.01

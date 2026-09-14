@@ -1,57 +1,43 @@
 #!/usr/bin/env python
-# Copyright (c) ModelScope Contributors. All rights reserved.
+# Copyright (c) Alibaba, Inc. and its affiliates.
 
 import argparse
 import datetime
 import math
 import os
-import pandas
 import subprocess
 import sys
+sys.path.insert(0, '/swift')
 import tempfile
 import time
-import torch
 import unittest
-import yaml
 from fnmatch import fnmatch
-from model_tag import ModelTag, commit_model_ut_result
 from pathlib import Path
-from test_utils import get_case_model_info
 from unittest import TextTestResult
 
-from swift.utils import get_logger
+import pandas
+# NOTICE: Tensorflow 1.15 seems not so compatible with pytorch.
+#         A segmentation fault may be raise by pytorch cpp library
+#         if 'import tensorflow' in front of 'import torch'.
+#         Putting a 'import torch' here can bypass this incompatibility.
+import torch
+import yaml
+from model_tag import ModelTag, commit_model_ut_result
+from test_utils import get_case_model_info
+
+from swift.utils.logger import get_logger
 
 logger = get_logger()
 
 
-def deduplicate_preserve_order(items):
-    return list(dict.fromkeys(items))
-
-
-def get_available_npu_devices(visible_npus):
-    npu_devices = [device.strip() for device in visible_npus.split(',') if device.strip()]
-    if not npu_devices:
-        return []
-
-    try:
-        import torch_npu  # noqa: F401
-        npu_count = torch.npu.device_count() if hasattr(torch, 'npu') and torch.npu.is_available() else 0
-    except Exception as e:
-        logger.warning('Failed to query torch.npu.device_count(): %s' % e)
-        return []
-
-    if npu_count <= 0:
-        logger.warning('ASCEND_RT_VISIBLE_DEVICES=%s, but torch.npu.device_count()=%s' % (visible_npus, npu_count))
-        return []
-    if npu_count < len(npu_devices):
-        logger.warning('ASCEND_RT_VISIBLE_DEVICES=%s, but torch.npu.device_count()=%s; using %s' %
-                       (visible_npus, npu_count, ','.join(npu_devices[:npu_count])))
-    return npu_devices[:npu_count]
-
-
 def test_cases_result_to_df(result_list):
-    table_header = ['Name', 'Result', 'Info', 'Start time', 'Stop time', 'Time cost(seconds)']
-    df = pandas.DataFrame(result_list, columns=table_header).sort_values(by=['Start time'], ascending=True)
+    table_header = [
+        'Name', 'Result', 'Info', 'Start time', 'Stop time',
+        'Time cost(seconds)'
+    ]
+    df = pandas.DataFrame(
+        result_list, columns=table_header).sort_values(
+            by=['Start time'], ascending=True)
     return df
 
 
@@ -73,16 +59,17 @@ def statistics_test_result(df):
     else:
         final_result = 'SUCCESS'
     result_msg = '%s (Runs=%s,success=%s,failures=%s,errors=%s,\
-    skipped=%s,expected failures=%s,unexpected successes=%s)' % (final_result, total_cases, success_cases,
-                                                                 failures_cases, error_cases, skipped_cases,
-                                                                 expected_failure_cases, unexpected_success_cases)
+    skipped=%s,expected failures=%s,unexpected successes=%s)' % (
+        final_result, total_cases, success_cases, failures_cases, error_cases,
+        skipped_cases, expected_failure_cases, unexpected_success_cases)
 
     model_cases = get_case_model_info()
     for model_name, case_info in model_cases.items():
         cases = df.loc[df['Name'].str.contains('|'.join(list(case_info)))]
         results = cases['Result']
         result = None
-        if any(results == 'Error') or any(results == 'Failures') or any(results == 'UnexpectedSuccesses'):
+        if any(results == 'Error') or any(results == 'Failures') or any(
+                results == 'UnexpectedSuccesses'):
             result = ModelTag.MODEL_FAIL
         elif any(results == 'Success'):
             result = ModelTag.MODEL_PASS
@@ -101,8 +88,9 @@ def statistics_test_result(df):
 
 def gather_test_suites_in_files(test_dir, case_file_list, list_tests):
     test_suite = unittest.TestSuite()
-    for case in deduplicate_preserve_order(case_file_list):
-        test_case = unittest.defaultTestLoader.discover(start_dir=test_dir, pattern=case)
+    for case in case_file_list:
+        test_case = unittest.defaultTestLoader.discover(
+            start_dir=test_dir, pattern=case)
         test_suite.addTest(test_case)
         if hasattr(test_case, '__iter__'):
             for subcase in test_case:
@@ -121,35 +109,50 @@ def gather_test_suites_files(test_dir, pattern):
             if fnmatch(file, pattern):
                 case_file_list.append(file)
 
-    return deduplicate_preserve_order(case_file_list)
+    return case_file_list
 
 
 def collect_test_results(case_results):
-    result_list = []  # each item is Case, Result, Start time, Stop time, Time cost
+    result_list = [
+    ]  # each item is Case, Result, Start time, Stop time, Time cost
     for case_result in case_results.successes:
-        result_list.append((case_result.test_full_name, 'Success', '', case_result.start_time, case_result.stop_time,
-                            case_result.time_cost))
+        result_list.append(
+            (case_result.test_full_name, 'Success', '', case_result.start_time,
+             case_result.stop_time, case_result.time_cost))
     for case_result in case_results.errors:
-        result_list.append((case_result[0].test_full_name, 'Error', case_result[1], case_result[0].start_time,
-                            case_result[0].stop_time, case_result[0].time_cost))
+        result_list.append(
+            (case_result[0].test_full_name, 'Error', case_result[1],
+             case_result[0].start_time, case_result[0].stop_time,
+             case_result[0].time_cost))
     for case_result in case_results.skipped:
-        result_list.append((case_result[0].test_full_name, 'Skipped', case_result[1], case_result[0].start_time,
-                            case_result[0].stop_time, case_result[0].time_cost))
+        result_list.append(
+            (case_result[0].test_full_name, 'Skipped', case_result[1],
+             case_result[0].start_time, case_result[0].stop_time,
+             case_result[0].time_cost))
     for case_result in case_results.expectedFailures:
-        result_list.append((case_result[0].test_full_name, 'ExpectedFailures', case_result[1],
-                            case_result[0].start_time, case_result[0].stop_time, case_result[0].time_cost))
+        result_list.append(
+            (case_result[0].test_full_name, 'ExpectedFailures', case_result[1],
+             case_result[0].start_time, case_result[0].stop_time,
+             case_result[0].time_cost))
     for case_result in case_results.failures:
-        result_list.append((case_result[0].test_full_name, 'Failures', case_result[1], case_result[0].start_time,
-                            case_result[0].stop_time, case_result[0].time_cost))
+        result_list.append(
+            (case_result[0].test_full_name, 'Failures', case_result[1],
+             case_result[0].start_time, case_result[0].stop_time,
+             case_result[0].time_cost))
     for case_result in case_results.unexpectedSuccesses:
-        result_list.append((case_result.test_full_name, 'UnexpectedSuccesses', '', case_result.start_time,
-                            case_result.stop_time, case_result.time_cost))
+        result_list.append((case_result.test_full_name, 'UnexpectedSuccesses',
+                            '', case_result.start_time, case_result.stop_time,
+                            case_result.time_cost))
     return result_list
 
 
 def run_command_with_popen(cmd):
     with subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, encoding='utf8') as sub_process:
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            encoding='utf8') as sub_process:
         for line in iter(sub_process.stdout.readline, ''):
             sys.stdout.write(line)
 
@@ -157,14 +160,7 @@ def run_command_with_popen(cmd):
 def async_run_command_with_popen(cmd, device_id):
     logger.info('Worker id: %s args: %s' % (device_id, cmd))
     env = os.environ.copy()
-    visible_npus = env.get('ASCEND_RT_VISIBLE_DEVICES')
-    if visible_npus:
-        npu_devices = get_available_npu_devices(visible_npus)
-        if npu_devices:
-            env['ASCEND_RT_VISIBLE_DEVICES'] = npu_devices[device_id % len(npu_devices)]
-            logger.info('Worker id: %s ASCEND_RT_VISIBLE_DEVICES: %s' % (device_id, env['ASCEND_RT_VISIBLE_DEVICES']))
-    else:
-        env['CUDA_VISIBLE_DEVICES'] = '%s' % device_id
+    env['CUDA_VISIBLE_DEVICES'] = '%s' % device_id
     sub_process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -181,18 +177,22 @@ def save_test_result(df, args):
         file_name = str(int(datetime.datetime.now().timestamp() * 1000))
         os.umask(0)
         Path(args.result_dir).mkdir(mode=0o777, parents=True, exist_ok=True)
-        Path(os.path.join(args.result_dir, file_name)).touch(mode=0o666, exist_ok=True)
+        Path(os.path.join(args.result_dir, file_name)).touch(
+            mode=0o666, exist_ok=True)
         df.to_pickle(os.path.join(args.result_dir, file_name))
 
 
 def run_command(cmd):
     logger.info('Running command: %s' % ' '.join(cmd))
-    response = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    response = subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         response.check_returncode()
         logger.info(response.stdout.decode('utf8'))
     except subprocess.CalledProcessError as error:
-        logger.error('stdout: %s, stderr: %s' % (response.stdout.decode('utf8'), error.stderr.decode('utf8')))
+        logger.error(
+            'stdout: %s, stderr: %s' %
+            (response.stdout.decode('utf8'), error.stderr.decode('utf8')))
 
 
 def install_packages(pkgs):
@@ -209,7 +209,8 @@ def install_requirements(requirements):
     for req in requirements:
         cmd = [
             sys.executable, '-m', 'pip', 'install', '-r',
-            'requirements/%s' % req, '-f', 'https://modelscope.oss-cn-beijing.aliyuncs.com/releases/repo.html'
+            'requirements/%s' % req, '-f',
+            'https://modelscope.oss-cn-beijing.aliyuncs.com/releases/repo.html'
         ]
         run_command(cmd)
 
@@ -261,7 +262,8 @@ def wait_for_workers(workers):
         time.sleep(0.001)
 
 
-def parallel_run_case_in_env(env_name, env, test_suite_env_map, isolated_cases, result_dir, parallel):
+def parallel_run_case_in_env(env_name, env, test_suite_env_map, isolated_cases,
+                             result_dir, parallel):
     logger.info('Running case in env: %s' % env_name)
     # install requirements and deps # run_config['envs'][env]
     if 'requirements' in env:
@@ -271,7 +273,8 @@ def parallel_run_case_in_env(env_name, env, test_suite_env_map, isolated_cases, 
     # case worker processes
     worker_processes = [None] * parallel
     for test_suite_file in isolated_cases:  # run case in subprocess
-        if test_suite_file in test_suite_env_map and test_suite_env_map[test_suite_file] == env_name:
+        if test_suite_file in test_suite_env_map and test_suite_env_map[
+                test_suite_file] == env_name:
             cmd = [
                 'python',
                 'tests/run.py',
@@ -297,10 +300,15 @@ def parallel_run_case_in_env(env_name, env, test_suite_env_map, isolated_cases, 
         return
     # roughly split case in parallel
     part_count = math.ceil(len(remain_suite_files) / parallel)
-    suites_chunks = [remain_suite_files[x:x + part_count] for x in range(0, len(remain_suite_files), part_count)]
+    suites_chunks = [
+        remain_suite_files[x:x + part_count]
+        for x in range(0, len(remain_suite_files), part_count)
+    ]
     for suites_chunk in suites_chunks:
         worker_idx = wait_for_free_worker(worker_processes)
-        cmd = ['python', 'tests/run.py', '--result_dir', result_dir, '--suites']
+        cmd = [
+            'python', 'tests/run.py', '--result_dir', result_dir, '--suites'
+        ]
         for suite in suites_chunk:
             cmd.append(suite)
         worker_process = async_run_command_with_popen(cmd, worker_idx)
@@ -310,7 +318,8 @@ def parallel_run_case_in_env(env_name, env, test_suite_env_map, isolated_cases, 
     wait_for_workers(worker_processes)
 
 
-def run_case_in_env(env_name, env, test_suite_env_map, isolated_cases, result_dir):
+def run_case_in_env(env_name, env, test_suite_env_map, isolated_cases,
+                    result_dir):
     # install requirements and deps # run_config['envs'][env]
     if 'requirements' in env:
         install_requirements(env['requirements'])
@@ -318,7 +327,8 @@ def run_case_in_env(env_name, env, test_suite_env_map, isolated_cases, result_di
         install_packages(env['dependencies'])
 
     for test_suite_file in isolated_cases:  # run case in subprocess
-        if test_suite_file in test_suite_env_map and test_suite_env_map[test_suite_file] == env_name:
+        if test_suite_file in test_suite_env_map and test_suite_env_map[
+                test_suite_file] == env_name:
             cmd = [
                 'python',
                 'tests/run.py',
@@ -345,8 +355,6 @@ def run_case_in_env(env_name, env, test_suite_env_map, isolated_cases, result_di
 
 
 def run_non_parallelizable_test_suites(suites, result_dir):
-    if len(suites) == 0:
-        return
     cmd = ['python', 'tests/run.py', '--result_dir', result_dir, '--suites']
     for suite in suites:
         cmd.append(suite)
@@ -358,7 +366,11 @@ def get_selected_cases():
     cmd = ['python', '-u', 'tests/run_analysis.py']
     selected_cases = []
     with subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, encoding='utf8') as sub_process:
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            encoding='utf8') as sub_process:
         for line in iter(sub_process.stdout.readline, ''):
             sys.stdout.write(line)
             if line.startswith('Selected cases:'):
@@ -381,17 +393,22 @@ def run_in_subprocess(args):
             for f in test_suite_files:
                 logger.info(f)
         except Exception:
-            logger.error('Get test suite based diff exception!, will run all cases.')
-            test_suite_files = gather_test_suites_files(os.path.abspath(args.test_dir), args.pattern)
+            logger.error(
+                'Get test suite based diff exception!, will run all cases.')
+            test_suite_files = gather_test_suites_files(
+                os.path.abspath(args.test_dir), args.pattern)
         if len(test_suite_files) == 0:
             logger.error('Get no test suite based on diff, run all the cases.')
-            test_suite_files = gather_test_suites_files(os.path.abspath(args.test_dir), args.pattern)
+            test_suite_files = gather_test_suites_files(
+                os.path.abspath(args.test_dir), args.pattern)
     else:
-        test_suite_files = gather_test_suites_files(os.path.abspath(args.test_dir), args.pattern)
-    test_suite_files = deduplicate_preserve_order(test_suite_files)
+        test_suite_files = gather_test_suites_files(
+            os.path.abspath(args.test_dir), args.pattern)
 
     non_parallelizable_suites = []
-    test_suite_files = [x for x in test_suite_files if x not in non_parallelizable_suites]
+    test_suite_files = [
+        x for x in test_suite_files if x not in non_parallelizable_suites
+    ]
 
     run_config = None
     isolated_cases = []
@@ -418,12 +435,14 @@ def run_in_subprocess(args):
 
     with tempfile.TemporaryDirectory() as temp_result_dir:
         # first run cases that nonparallelizable
-        run_non_parallelizable_test_suites(non_parallelizable_suites, temp_result_dir)
+        run_non_parallelizable_test_suites(non_parallelizable_suites,
+                                           temp_result_dir)
 
         # run case parallel in envs
         for env in set(test_suite_env_map.values()):
-            parallel_run_case_in_env(env, run_config['envs'][env], test_suite_env_map, isolated_cases, temp_result_dir,
-                                     args.parallel)
+            parallel_run_case_in_env(env, run_config['envs'][env],
+                                     test_suite_env_map, isolated_cases,
+                                     temp_result_dir, args.parallel)
 
         result_dfs = []
         result_path = Path(temp_result_dir)
@@ -431,7 +450,8 @@ def run_in_subprocess(args):
             if Path.is_file(result):
                 df = pandas.read_pickle(result)
                 result_dfs.append(df)
-        result_pd = pandas.concat(result_dfs)  # merge result of every test suite.
+        result_pd = pandas.concat(
+            result_dfs)  # merge result of every test suite.
         print_table_result(result_pd)
         print_abnormal_case_info(result_pd)
         statistics_test_result(result_pd)
@@ -450,12 +470,15 @@ class TimeCostTextTestResult(TextTestResult):
 
     def __init__(self, stream, descriptions, verbosity):
         self.successes = []
-        super(TimeCostTextTestResult, self).__init__(stream, descriptions, verbosity)
+        super(TimeCostTextTestResult,
+                     self).__init__(stream, descriptions, verbosity)
 
     def startTest(self, test):
         test.start_time = datetime.datetime.now()
-        test.test_full_name = get_object_full_name(test) + '.' + test._testMethodName
-        self.stream.writeln('Test case:  %s start at: %s' % (test.test_full_name, test.start_time))
+        test.test_full_name = get_object_full_name(
+            test) + '.' + test._testMethodName
+        self.stream.writeln('Test case:  %s start at: %s' %
+                            (test.test_full_name, test.start_time))
 
         return super(TimeCostTextTestResult, self).startTest(test)
 
@@ -463,9 +486,11 @@ class TimeCostTextTestResult(TextTestResult):
         TextTestResult.stopTest(self, test)
         test.stop_time = datetime.datetime.now()
         test.time_cost = (test.stop_time - test.start_time).total_seconds()
-        self.stream.writeln('Test case: %s stop at: %s, cost time: %s(seconds)' %
-                            (test.test_full_name, test.stop_time, test.time_cost))
-        if torch.cuda.is_available() and test.time_cost > 5.0:  # print nvidia-smi
+        self.stream.writeln(
+            'Test case: %s stop at: %s, cost time: %s(seconds)' %
+            (test.test_full_name, test.stop_time, test.time_cost))
+        if torch.cuda.is_available(
+        ) and test.time_cost > 5.0:  # print nvidia-smi
             cmd = ['nvidia-smi']
             run_command_with_popen(cmd)
         super(TimeCostTextTestResult, self).stopTest(test)
@@ -487,12 +512,17 @@ class TimeCostTextTestRunner(unittest.runner.TextTestRunner):
 
 
 def gather_test_cases(test_dir, pattern, list_tests):
-    case_list = gather_test_suites_files(test_dir, pattern)
+    case_list = []
+    for dirpath, dirnames, filenames in os.walk(test_dir):
+        for file in filenames:
+            if fnmatch(file, pattern):
+                case_list.append(file)
 
     test_suite = unittest.TestSuite()
 
     for case in case_list:
-        test_case = unittest.defaultTestLoader.discover(start_dir=test_dir, pattern=case)
+        test_case = unittest.defaultTestLoader.discover(
+            start_dir=test_dir, pattern=case)
         test_suite.addTest(test_case)
         if hasattr(test_case, '__iter__'):
             for subcase in test_case:
@@ -507,7 +537,8 @@ def gather_test_cases(test_dir, pattern, list_tests):
 def print_abnormal_case_info(df):
     df = df.loc[(df['Result'] == 'Error') | (df['Result'] == 'Failures')]
     for _, row in df.iterrows():
-        print('Case %s run result: %s, msg:\n%s' % (row['Name'], row['Result'], row['Info']))
+        print('Case %s run result: %s, msg:\n%s' %
+              (row['Name'], row['Result'], row['Info']))
 
 
 def print_table_result(df):
@@ -517,7 +548,8 @@ def print_table_result(df):
         'Name': '{{:<{}s}}'.format(df['Name'].str.len().max()).format,
         'Result': '{{:<{}s}}'.format(df['Result'].str.len().max()).format,
     }
-    with pandas.option_context('display.max_rows', None, 'display.max_columns', None, 'display.width', None):
+    with pandas.option_context('display.max_rows', None, 'display.max_columns',
+                               None, 'display.width', None):
         print(df.to_string(justify='left', formatters=formatters, index=False))
 
 
@@ -525,12 +557,15 @@ def main(args):
     runner = TimeCostTextTestRunner()
     if args.suites is not None and len(args.suites) > 0:
         logger.info('Running: %s' % ' '.join(args.suites))
-        test_suite = gather_test_suites_in_files(args.test_dir, args.suites, args.list_tests)
+        test_suite = gather_test_suites_in_files(args.test_dir, args.suites,
+                                                 args.list_tests)
     else:
-        test_suite = gather_test_cases(os.path.abspath(args.test_dir), args.pattern, args.list_tests)
+        test_suite = gather_test_cases(
+            os.path.abspath(args.test_dir), args.pattern, args.list_tests)
     if not args.list_tests:
         result = runner.run(test_suite)
-        logger.info('Running case completed, pid: %s, suites: %s' % (os.getpid(), args.suites))
+        logger.info('Running case completed, pid: %s, suites: %s' %
+                    (os.getpid(), args.suites))
         result = collect_test_results(result)
         df = test_cases_result_to_df(result)
         if args.result_dir is not None:
@@ -543,21 +578,44 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('test runner')
-    parser.add_argument('--list_tests', action='store_true', help='list all tests')
-    parser.add_argument('--pattern', default='test_*.py', help='test file pattern')
-    parser.add_argument('--test_dir', default='tests', help='directory to be tested')
-    parser.add_argument('--level', default=0, type=int, help='2 -- all, 1 -- p1, 0 -- p0')
-    parser.add_argument('--profile', action='store_true', help='enable profiling')
-    parser.add_argument('--run_config', default=None, help='specified case run config file(yaml file)')
-    parser.add_argument('--subprocess', action='store_true', help='run all test suite in subprocess')
-    parser.add_argument('--result_dir', default=None, help='Save result to directory, internal use only')
     parser.add_argument(
-        '--parallel', default=1, type=int, help='Set case parallels, default single process, set with gpu number.')
+        '--list_tests', action='store_true', help='list all tests')
+    parser.add_argument(
+        '--pattern', default='test_*.py', help='test file pattern')
+    parser.add_argument(
+        '--test_dir', default='tests', help='directory to be tested')
+    parser.add_argument(
+        '--level', default=0, type=int, help='2 -- all, 1 -- p1, 0 -- p0')
+    parser.add_argument(
+        '--profile', action='store_true', help='enable profiling')
+    parser.add_argument(
+        '--run_config',
+        default=None,
+        help='specified case run config file(yaml file)')
+    parser.add_argument(
+        '--subprocess',
+        action='store_true',
+        help='run all test suite in subprocess')
+    parser.add_argument(
+        '--result_dir',
+        default=None,
+        help='Save result to directory, internal use only')
+    parser.add_argument(
+        '--parallel',
+        default=1,
+        type=int,
+        help='Set case parallels, default single process, set with gpu number.'
+    )
     parser.add_argument(
         '--no-diff',
         action='store_true',
-        help='Default running case based on git diff(with master), disable with --no-diff)')
-    parser.add_argument('--suites', nargs='*', help='Run specified test suites(test suite files list split by space)')
+        help=
+        'Default running case based on git diff(with master), disable with --no-diff)'
+    )
+    parser.add_argument(
+        '--suites',
+        nargs='*',
+        help='Run specified test suites(test suite files list split by space)')
     args = parser.parse_args()
     print(args)
     if args.run_config is not None or args.subprocess:
