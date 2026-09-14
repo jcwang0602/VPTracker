@@ -1,0 +1,4 @@
+-r requirements.txt
+ms-swift==4.5.3
+qwen-vl-utils==0.0.14
+datasets>=3.0,<4.8.5

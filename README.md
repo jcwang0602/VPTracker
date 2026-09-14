@@ -1,105 +1,133 @@
 # VPTracker: Global Vision-Language Tracking via Visual Prompt and MLLM
 
-[![hf_paper](https://img.shields.io/badge/🤗-Paper%20In%20HF-red.svg)]((https://huggingface.co/papers/2512.22799))
-[![arXiv](https://img.shields.io/badge/Arxiv-2512.22799-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2512.22799)
-[![Python](https://img.shields.io/badge/Python-3.9-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.5.1-red.svg)](https://pytorch.org/)
-[![Transformers](https://img.shields.io/badge/Transformers-4.37.2-green.svg)](https://huggingface.co/docs/transformers/)
+[Paper](https://arxiv.org/abs/2512.22799) · [Model weights](https://huggingface.co/jcwang0602/VPTracker)
 
-<img src="assets/VPTracker.jpg" width="800">
+VPTracker tracks an object from its initial bounding box and language description.
+This repository contains the dataset builder, supervised fine-tuning code, and
+frame-by-frame inference for the Qwen3.5-2B version.
 
-## 🚀 Quick Start
+<img src="assets/VPTracker.jpg" width="800" alt="VPTracker overview">
 
-### Installation
+## Install
 
-```bash
-conda create -n vptrack python==3.10
-conda activate vptrack
-
-cd ms-swift
-conda install -c conda-forge pyarrow sentencepiece
-pip install -e .
-pip install "sglang[all]" -U
-pip install "vllm>=0.5.1" "transformers<4.55" "trl<0.21" -U
-pip install "lmdeploy>=0.5" -U
-pip install autoawq -U --no-deps
-pip install auto_gptq optimum bitsandbytes "gradio<5.33" -U
-pip install git+https://github.com/modelscope/ms-swift.git
-pip install timm -U
-pip install "deepspeed" -U
-pip install flash-attn==2.7.4.post1 --no-build-isolation
-
-conda install av -c conda-forge
-pip install qwen_vl_utils qwen_omni_utils decord librosa icecream soundfile -U
-pip install liger_kernel nvitop pre-commit math_verify py-spy -U
-
-```
-
-### Data Preparation
-Datasets: [TNL2K](https://github.com/wangxiao5791509/TNL2K_evaluation_toolkit), [TNLLT](https://github.com/Event-AHU/Open_VLTrack)
-
-```angular2html
-|-- data
-│   ├── tnl2k
-│   │   ├──test
-│   │   |   ├──advSamp_Baseball_game_002-Done
-│   │   |   └──...
-│   │   └──train
-│   │       ├──Arrow_Video_ZZ04_done
-│   │       └──...
-│   └── tnllt
-│       ├──JE_Assian_ship_v01
-│       └──...
-```
-### Data PreParation
+Use Python 3.11 or newer and a PyTorch installation suitable for your CUDA driver.
 
 ```bash
-bash data_preparation.sh
+git clone https://github.com/jcwang0602/VPTracker.git
+cd VPTracker
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-### Model Training
+For training, also install:
 
 ```bash
-bash train.sh
+python -m pip install -r requirements-train.txt
 ```
 
-### Model Testing
+Training uses the official `ms-swift==4.5.3` package and the small VPTracker plugin
+in `vptracker/swift_plugin.py`. The plugin crops the template and draws the visual
+prompt before tokenization. Inference uses Transformers directly. Both paths
+share the same prompt and image preparation code in `vptracker/`.
+
+## Build the training dataset
+
+Download [TNL2K](https://github.com/wangxiao5791509/TNL2K_evaluation_toolkit) and
+[TNLLT](https://github.com/Event-AHU/Open_VLTrack) from their providers. Arrange the
+extracted sequences as follows; each sequence needs `imgs/`, `groundtruth.txt`
+with one `x,y,width,height` row per frame, and `language.txt`.
+
+```text
+data/
+├── tnl2k/
+│   └── train/
+│       └── <sequence>/{imgs/,groundtruth.txt,language.txt}
+└── tnllt/
+    └── <sequence>/{imgs/,groundtruth.txt,language.txt}
+```
 
 ```bash
-bash infer.sh
+bash data_preparation.sh \
+    --tnl2k-root data/tnl2k \
+    --tnllt-root data/tnllt \
+    --output data_jsonlines/train.jsonl
 ```
 
-## 📦 Checkpoints
+The defaults generate 1,000,000 samples with seed 42: 700,000 from TNL2K's
+`train/` directory and 300,000 from the TNLLT training sequences listed in
+`data_specs/tnllt_train_split.txt`. Use `--samples 100` for a small build.
+The builder checks frame/annotation counts and fails on incomplete sequences.
 
-You can download it from HuggingFace:
-[VPTracker](https://huggingface.co/jcwang0602/VPTracker)
+Each JSONL row contains a visible template frame, a later search frame, a tracking
+instruction, an answer with visibility and an absolute-pixel `xyxy` box, and
+`visual_prompt` metadata. Images remain on disk; keep them accessible at the
+absolute paths recorded in the JSONL. Training crops the template at scale 2,
+draws a solid blue one-pixel prompt on the full search image with a scale sampled
+from 2 through 8, and uses a 0.75 probability for the contained-prompt branch.
 
+## Train
 
-## 👀 Visualization
-<img src="assets/Results.jpg" width="800">
-
-
-## 🙏 Acknowledgments
-This code is developed on the top of [ms-swift](https://github.com/modelscope/ms-swift)
-
-## ✉️ Contact
-
-Email: jcwang@stu.ecnu.edu.cn. Any kind discussions are welcomed!
-
----
-
-## 📖 Citation
-If our work is useful for your research, please consider cite:
+```bash
+GPUS=1 bash train.sh
 ```
+
+The default base is `Qwen/Qwen3.5-2B`. The script performs full-parameter SFT for
+one epoch with learning rate `2e-5`, BF16, and effective batch size 128. SDPA is the
+default attention backend. Training requires CUDA hardware with BF16 support;
+memory needs depend on image size and per-device batch size.
+
+For multiple GPUs or a local model/dataset:
+
+```bash
+GPUS=8 MODEL=/path/to/Qwen3.5-2B DATASET=/path/to/train.jsonl \
+    OUTPUT_DIR=outputs/VPTracker bash train.sh
+```
+
+`PER_DEVICE_BATCH_SIZE` defaults to 4. Reduce it if GPU memory is limited; gradient
+accumulation is computed from `BATCH_SIZE / (GPUS * PER_DEVICE_BATCH_SIZE)`.
+Additional ms-swift SFT arguments can be appended to `train.sh`. Model processor
+defaults determine image resolution, with no extra image-token cap applied.
+
+## Run tracking
+
+Provide a directory of video frames, a target description, and the target's
+initial box in **`x y width height` pixel coordinates**:
+
+```bash
+bash infer.sh \
+    --model jcwang0602/VPTracker \
+    --frames /path/to/video/imgs \
+    --language "the person wearing a red shirt" \
+    --init-bbox 120 80 50 100 \
+    --output results/video.txt
+```
+
+Replace the example paths, description, and box with your video's inputs. The box
+must lie inside the first frame. A local directory saved by training can also be
+passed to `--model`. Use `--device cuda:0` to select a GPU.
+
+Frames are read in natural filename order. The tracker keeps the initial visual
+template, draws the blue search prompt around the previous position at scale 3,
+and predicts on the full search image. The output contains one comma-separated
+`x,y,width,height` row per frame, including the initial box. If the model reports
+the target invisible or returns an invalid box, the tracker retains the previous
+position and prints a diagnostic. Output is published only after all frames
+finish successfully.
+
+## Citation
+
+```bibtex
 @misc{wang2025vptrackerglobalvisionlanguagetracking,
-      title={VPTracker: Global Vision-Language Tracking via Visual Prompt and MLLM}, 
-      author={Jingchao Wang and Kaiwen Zhou and Zhijian Wu and Kunhua Ji and Dingjiang Huang and Yefeng Zheng},
-      year={2025},
-      eprint={2512.22799},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2512.22799}, 
+  title={VPTracker: Global Vision-Language Tracking via Visual Prompt and MLLM},
+  author={Jingchao Wang and Kaiwen Zhou and Zhijian Wu and Kunhua Ji and Dingjiang Huang and Yefeng Zheng},
+  year={2025},
+  eprint={2512.22799},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV}
 }
 ```
-<!-- ## ✨ Star History
-[![Star History Chart](https://api.star-history.com/svg?repos=jcwang0602/MLLMSeg&type=Date)](https://star-history.com/#jcwang0602/MLLMSeg&Date) -->
+
+Built with [ms-swift](https://github.com/modelscope/ms-swift) and
+[Transformers](https://github.com/huggingface/transformers). Code is licensed under
+Apache-2.0; see [LICENSE](LICENSE).
