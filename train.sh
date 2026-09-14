@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/ms-swift:$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export TOKENIZERS_PARALLELISM=false
 export QWENVL_BBOX_FORMAT=new
 export NPROC_PER_NODE="${GPUS:-1}"
@@ -20,8 +20,8 @@ if [[ ! -s "$DATASET" ]]; then
 fi
 # Preserve the model processor's default image resolution.
 unset IMAGE_MAX_TOKEN_NUM
-exec swift sft \
-    --external_plugins "$ROOT/vptracker/swift_plugin.py" \
+exec python -m swift.cli.main sft \
+    --external_plugins "$ROOT/ms-swift/swift/template/vptracker_plugin.py" \
     --model "$MODEL" --model_type qwen3_5 --template vptracker \
     --dataset "$DATASET" --split_dataset_ratio 0 --eval_strategy no \
     --num_train_epochs 1 --learning_rate 2e-5 --warmup_ratio 0.05 \

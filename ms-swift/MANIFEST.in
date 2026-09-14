@@ -1,0 +1,3 @@
+include LICENSE README.md requirements.txt
+recursive-include requirements *.txt
+recursive-include swift *.json

@@ -26,10 +26,15 @@ For training, also install:
 python -m pip install -r requirements-train.txt
 ```
 
-Training uses the official `ms-swift==4.5.3` package and the small VPTracker plugin
-in `vptracker/swift_plugin.py`. The plugin crops the template and draws the visual
-prompt before tokenization. Inference uses Transformers directly. Both paths
-share the same prompt and image preparation code in `vptracker/`.
+The training requirements install the included `ms-swift/` source in editable
+mode. This source is based on official ms-swift v4.5.3 and retains the SFT and
+inference components; its local version is `4.5.3+vptracker1`. See
+[ms-swift/README.md](ms-swift/README.md) for the upstream revision and changes.
+
+`train.sh` runs this repository's source and loads
+`ms-swift/swift/template/vptracker_plugin.py`, which crops the template and draws the visual
+prompt before tokenization. Tracking inference uses Transformers directly. Both
+paths share the prompt and image preparation code in `vptracker/`.
 
 ## Build the training dataset
 

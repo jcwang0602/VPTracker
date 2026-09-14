@@ -1,7 +1,7 @@
 """Register VPTracker's visual-prompt SFT template with ms-swift 4.5.3.
 
-Loaded by train.sh through --external_plugins. The upstream package is not
-modified: ordinary qwen3_5 samples keep their original template.
+Loaded by train.sh through --external_plugins with the bundled Swift source.
+Ordinary qwen3_5 samples keep their original template.
 """
 
 from copy import deepcopy

@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+build/
+dist/
 .venv/
 .env
 .pytest_cache/
@@ -32,8 +34,7 @@ __pycache__/
 *.pth
 *.bin
 
-# Local tools and legacy dependency checkouts
-/ms-swift/
+# Local tools
 /.agents/
 /.codex/
 /.vscode/
