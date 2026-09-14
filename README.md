@@ -10,7 +10,7 @@ frame-by-frame inference for the Qwen3.5-2B version.
 
 ## Install
 
-Use Python 3.11 or newer and a PyTorch installation suitable for your CUDA driver.
+Use Python 3.10 or newer and a PyTorch installation suitable for your CUDA driver.
 
 ```bash
 git clone https://github.com/jcwang0602/VPTracker.git
@@ -32,9 +32,9 @@ inference components; its local version is `4.5.3+vptracker1`. See
 [ms-swift/README.md](ms-swift/README.md) for the upstream revision and changes.
 
 `train.sh` runs this repository's source and loads
-`ms-swift/swift/template/vptracker_plugin.py`, which crops the template and draws the visual
-prompt before tokenization. Tracking inference uses Transformers directly. Both
-paths share the prompt and image preparation code in `vptracker/`.
+`ms-swift/swift/template/vptracker_plugin.py`, which crops the template and draws
+the visual prompt before tokenization. Tracking inference uses Transformers
+directly. Both paths share the prompt and image preparation code in `vptracker/`.
 
 ## Build the training dataset
 
@@ -44,13 +44,22 @@ extracted sequences as follows; each sequence needs `imgs/`, `groundtruth.txt`
 with one `x,y,width,height` row per frame, and `language.txt`.
 
 ```text
-data/
+data/                            # Raw datasets
 ├── tnl2k/
 │   └── train/
 │       └── <sequence>/{imgs/,groundtruth.txt,language.txt}
 └── tnllt/
     └── <sequence>/{imgs/,groundtruth.txt,language.txt}
+data_jsonlines/                   # Generated training JSONL
+models/                          # Downloaded base models or tracking weights
+outputs/                         # Training runs and saved models
+results/                         # Tracking predictions
 ```
+
+These local directories are ignored by Git; datasets, weights, and generated
+results are not included in the code repository. The tracked
+`data_specs/tnllt_train_split.txt` contains the TNLLT training sequence names used
+by the builder.
 
 ```bash
 bash data_preparation.sh \
@@ -62,7 +71,9 @@ bash data_preparation.sh \
 The defaults generate 1,000,000 samples with seed 42: 700,000 from TNL2K's
 `train/` directory and 300,000 from the TNLLT training sequences listed in
 `data_specs/tnllt_train_split.txt`. Use `--samples 100` for a small build.
-The builder checks frame/annotation counts and fails on incomplete sequences.
+This reduces the number of generated pairs; the selected training sequences must
+still be available in both dataset roots. The builder checks frame/annotation
+counts and fails on incomplete sequences.
 
 Each JSONL row contains a visible template frame, a later search frame, a tracking
 instruction, an answer with visibility and an absolute-pixel `xyxy` box, and
@@ -76,6 +87,9 @@ from 2 through 8, and uses a 0.75 probability for the contained-prompt branch.
 ```bash
 GPUS=1 bash train.sh
 ```
+
+By default, training reads `data_jsonlines/train.jsonl` and saves each run under
+`outputs/VPTracker/` in a versioned subdirectory. Run the dataset builder first.
 
 The default base is `Qwen/Qwen3.5-2B`. The script performs full-parameter SFT for
 one epoch with learning rate `2e-5`, BF16, and effective batch size 128. SDPA is the
@@ -109,8 +123,12 @@ bash infer.sh \
 ```
 
 Replace the example paths, description, and box with your video's inputs. The box
-must lie inside the first frame. A local directory saved by training can also be
-passed to `--model`. Use `--device cuda:0` to select a GPU.
+must lie inside the first frame. Use `--device cuda:0` to select a GPU.
+
+To use your own trained model, pass the `last_model_checkpoint` path printed at
+the end of training to `--model`. With the default output settings, this is a
+directory such as `outputs/VPTracker/v0-<timestamp>/checkpoint-<step>/`, containing
+the model configuration, processor files, and weights.
 
 Frames are read in natural filename order. The tracker keeps the initial visual
 template, draws the blue search prompt around the previous position at scale 3,
